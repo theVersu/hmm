@@ -4,11 +4,11 @@
 // @match       https://wtr-lab.com/en/*
 // @grant       GM_getValue
 // @grant       GM_setValue
-// @version     2.5
+// @version     2.5.1
 // @author      -
 // @description No longer need 2 scripts, same as the other script, so you only need to download 1
-// @downloadURL https://update.greasyfork.org/scripts/552952/WTR-Lab%20Chapter%20Downloader%20%28EPUB%29%20and%20Unlimited%20Replace%20Terms.user.js
-// @updateURL   https://update.greasyfork.org/scripts/552952/WTR-Lab%20Chapter%20Downloader%20%28EPUB%29%20and%20Unlimited%20Replace%20Terms.meta.js
+// @downloadURL https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/script.js?token=GHSAT0AAAAAAEEAFY4NZJKCYQX7HESXXGYA2TIX5KA
+// @updateURL   https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/script.js?token=GHSAT0AAAAAAEEAFY4NZJKCYQX7HESXXGYA2TIX5KA
 // ==/UserScript==
 
 (async function WTRDownloader() {
@@ -839,7 +839,14 @@ async function buildAllContentFromSelected() {
   const selectedOrders = [...menu.querySelectorAll("#chaptersList input:checked")].map(cb => cb.dataset.order);
   const allContent = [];
 
-  for (const order of selectedOrders) {
+  // Sort selectedOrders descending by term length (longest search phrases first)
+  const sortedOrders = selectedOrders.slice().sort((a, b) => {
+    const lenA = (a.from || '').length;
+    const lenB = (b.from || '').length;
+    return lenB - lenA;
+  });
+
+  for (const order of sortedOrders) {
     try {
       const html = await fetchChapterContent(order);
       allContent.push(html);
