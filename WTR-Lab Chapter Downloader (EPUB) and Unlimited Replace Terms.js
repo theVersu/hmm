@@ -4,11 +4,11 @@
 // @match       https://wtr-lab.com/en/*
 // @grant       GM_getValue
 // @grant       GM_setValue
-// @version     2.5.1
+// @version     2.5.2
 // @author      -
 // @description No longer need 2 scripts, same as the other script, so you only need to download 1
-// @downloadURL https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/script.js?token=GHSAT0AAAAAAEEAFY4NZJKCYQX7HESXXGYA2TIX5KA
-// @updateURL   https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/script.js?token=GHSAT0AAAAAAEEAFY4NZJKCYQX7HESXXGYA2TIX5KA
+// @downloadURL https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/WTR-Lab Chapter Downloader (EPUB) and Unlimited Replace Terms.js
+// @updateURL   https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/WTR-Lab Chapter Downloader (EPUB) and Unlimited Replace Terms.js
 // ==/UserScript==
 
 (async function WTRDownloader() {
@@ -51,7 +51,12 @@
     const WILDCARD = '@';
     const punctuationRegex = /^[\W_'"“”‘’„,;:!?~()\[\]{}<>【】「」『』（）《》〈〉—–-]|[\W_'"“”‘’„,;:!?~()\[\]{}<>【】「」『』（）《》〈〉—–-]$/;
 
-    for (const entry of replacements) {
+    // Sort EPUB downloader word list descending by character length
+    const sortedReplacements = replacements.slice().sort((a, b) => {
+      return (b.from || '').length - (a.from || '').length;
+    });
+
+    for (const entry of sortedReplacements) {
       if (!entry.from || !entry.to || !entry.enabled) continue;
       const flags = entry.ignoreCapital ? 'gi' : 'g';
       let base = escapeRegex(entry.from).replace(new RegExp(`\\${WILDCARD}`, 'g'), '.');
@@ -839,12 +844,8 @@ async function buildAllContentFromSelected() {
   const selectedOrders = [...menu.querySelectorAll("#chaptersList input:checked")].map(cb => cb.dataset.order);
   const allContent = [];
 
-  // Sort selectedOrders descending by term length (longest search phrases first)
-  const sortedOrders = selectedOrders.slice().sort((a, b) => {
-    const lenA = (a.from || '').length;
-    const lenB = (b.from || '').length;
-    return lenB - lenA;
-  });
+  // Sort chapter orders numerically (1, 2, 3...)
+  const sortedOrders = selectedOrders.slice().sort((a, b) => Number(a) - Number(b));
 
   for (const order of sortedOrders) {
     try {
@@ -858,7 +859,7 @@ async function buildAllContentFromSelected() {
   }
 
   console.info("[INFO] Finished fetching all chapters.");
-  return { content: allContent, orders: selectedOrders };
+  return { content: allContent, orders: sortedOrders };
 }
 
   // --- 4. EPUB functions ---
@@ -1263,7 +1264,12 @@ function applyReplacements(text, replacements) {
   const punctuationRegex =
     /^[\W_'"“”‘’„,;:!?~()\[\]{}<>【】「」『』（）《》〈〉—–-]|[\W_'"“”‘’„,;:!?~()\[\]{}<>【】「」『』（）《》〈〉—–-]$/;
 
-  for (const entry of replacements) {
+  // SORT replacements descending by 'from' length:
+  const sortedReplacements = replacements.slice().sort((a, b) => {
+    return (b.from || '').length - (a.from || '').length;
+  });
+
+  for (const entry of sortedReplacements) {
     if (!entry.from || !entry.to) continue;
 
     const flags = entry.ignoreCapital ? 'gi' : 'g';
@@ -1679,9 +1685,15 @@ window.replacements = GM_getValue('dataHashReplacements', []);
 
 window.applyDataHashReplacements = function () {
     if (!window.replacements.length) return;
+
+    // Sort raws descending by dataHash string length (longest hashes matched first)
+    const sortedRaws = window.replacements.slice().sort((a, b) => {
+        return (b.dataHash || '').length - (a.dataHash || '').length;
+    });
+
     const spans = document.querySelectorAll('span[data-hash]');
     spans.forEach(span => {
-        const dhEntry = window.replacements.find(r => r.dataHash === span.getAttribute('data-hash'));
+        const dhEntry = sortedRaws.find(r => r.dataHash === span.getAttribute('data-hash'));
         if (dhEntry) span.textContent = dhEntry.to;
     });
 };
@@ -1773,8 +1785,6 @@ function openRawsModal() {
     }
 
     document.body.appendChild(modal);
-
-    // ... (rest of your openRawsModal function remains unchanged)
 
     const closeBtn = document.createElement('button');
     closeBtn.textContent = 'Close';
