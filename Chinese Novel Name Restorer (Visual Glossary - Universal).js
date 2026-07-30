@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Chinese Novel Name Restorer (Visual Glossary - Universal)
 // @namespace    http://tampermonkey.net/
-// @version      3.8
-// @description  Adds multi-novel dropdown support, tabbed categories, scoped import/export, word-boundary matching for units/words, case sensitivity, and hotkey blocking.
+// @version      3.9
+// @description  Adds multi-novel dropdown support, tabbed categories, scoped import/export, proper symbol & bracket matching, case sensitivity, and hotkey blocking.
 // @author       You
 // @match        https://*.mvlempyr.io/*
 // @match        https://wtr-lab.com/*
@@ -129,6 +129,7 @@
 
     function updateRegexRules() {
         const glossary = getCombinedActiveGlossary();
+        // Sort keys by length descending to match longest terms first
         const sortedKeys = Object.keys(glossary).sort((a, b) => b.length - a.length);
 
         const rules = [];
@@ -141,12 +142,21 @@
             if (hasChineseChar) {
                 pattern = escapeRegExp(badName);
             } else {
-                // Split words by space to handle whitespace flexible matching (\s+) and strictly enforce case sensitivity
+                // Handle space flexibility (\s+)
                 const wordParts = badName.split(/\s+/).map(escapeRegExp);
-                pattern = `\\b${wordParts.join('\\s+')}\\b`;
+                const corePattern = wordParts.join('\\s+');
+
+                // Determine whether boundary \b should be attached (only if first/last char is a word character)
+                const startsWithWordChar = /^\w/.test(badName);
+                const endsWithWordChar = /\w$/.test(badName);
+
+                const prefix = startsWithWordChar ? '\\b' : '';
+                const suffix = endsWithWordChar ? '\\b' : '';
+
+                pattern = `${prefix}${corePattern}${suffix}`;
             }
 
-            // Using case-sensitive 'g' flag for exact matching (e.g. 'li' != 'Li')
+            // Using case-sensitive 'g' flag for exact matching
             rules.push({
                 regex: new RegExp(pattern, 'g'),
                 original: goodName,
@@ -169,7 +179,8 @@
 
         for (const rule of replacementRules) {
             if (rule.regex.test(text)) {
-                text = text.replace(rule.regex, rule.original);
+                // Use function callback to avoid evaluation of special characters like '$' in target strings
+                text = text.replace(rule.regex, () => rule.original);
                 modified = true;
             }
         }
