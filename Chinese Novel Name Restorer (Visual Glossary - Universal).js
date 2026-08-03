@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chinese Novel Name Restorer (Visual Glossary - Universal)
 // @namespace    http://tampermonkey.net/
-// @version      3.9
+// @version      3.9.2
 // @description  Adds multi-novel dropdown support, tabbed categories, scoped import/export, proper symbol & bracket matching, case sensitivity, and hotkey blocking.
 // @author       You
 // @match        https://*.mvlempyr.io/*
@@ -96,11 +96,8 @@
         return merged;
     }
 
-    function saveGlossaryForCurrentScope(glossary) {
-        const targetKey = (selectedNovelFilter === 'ALL') ? CURRENT_STORAGE_KEY : selectedNovelFilter;
-        GM_setValue(targetKey, JSON.stringify(glossary));
-        updateRegexRules();
-        if (isEngineActive) runReplacement();
+    function getTargetSaveKey() {
+        return (selectedNovelFilter === 'ALL') ? CURRENT_STORAGE_KEY : selectedNovelFilter;
     }
 
     // ==========================================
@@ -179,7 +176,6 @@
 
         for (const rule of replacementRules) {
             if (rule.regex.test(text)) {
-                // Use function callback to avoid evaluation of special characters like '$' in target strings
                 text = text.replace(rule.regex, () => rule.original);
                 modified = true;
             }
@@ -492,8 +488,8 @@
             </div>
 
             <div class="gl-tabs">
-                <button class="gl-tab-btn active" id="gl-tab-cn">Chinese > English</button>
-                <button class="gl-tab-btn" id="gl-tab-en">English > English</button>
+                <button class="gl-tab-btn active" id="gl-tab-cn">Chinese > English (0)</button>
+                <button class="gl-tab-btn" id="gl-tab-en">English > English (0)</button>
             </div>
 
             <div class="gl-body">
@@ -608,8 +604,24 @@
         const listContainer = document.getElementById('gl-list-container');
         if (!listContainer) return;
 
-        listContainer.innerHTML = '';
         const allKeys = Object.keys(glossary);
+        let cnCount = 0;
+        let enCount = 0;
+
+        allKeys.forEach(key => {
+            if (isChinese(key)) {
+                cnCount++;
+            } else {
+                enCount++;
+            }
+        });
+
+        const tabCN = document.getElementById('gl-tab-cn');
+        const tabEN = document.getElementById('gl-tab-en');
+        if (tabCN) tabCN.textContent = `Chinese > English (${cnCount})`;
+        if (tabEN) tabEN.textContent = `English > English (${enCount})`;
+
+        listContainer.innerHTML = '';
 
         const filteredKeys = allKeys.filter(key => {
             const hasChinese = isChinese(key);
@@ -638,10 +650,7 @@
         listContainer.querySelectorAll('.gl-delete').forEach(btn => {
             btn.addEventListener('click', function() {
                 const keyToDelete = this.getAttribute('data-key');
-                const glossary = getCombinedActiveGlossary();
-                delete glossary[keyToDelete];
-                saveGlossaryForCurrentScope(glossary);
-                renderList();
+                deleteTerm(keyToDelete);
             });
         });
     }
@@ -654,9 +663,14 @@
 
         if (!badVal || !goodVal) return;
 
-        const glossary = getCombinedActiveGlossary();
-        glossary[badVal] = goodVal;
-        saveGlossaryForCurrentScope(glossary);
+        const targetKey = getTargetSaveKey();
+        const targetGlossary = loadGlossaryForKey(targetKey);
+        
+        targetGlossary[badVal] = goodVal;
+        GM_setValue(targetKey, JSON.stringify(targetGlossary));
+
+        updateRegexRules();
+        if (isEngineActive) runReplacement();
         renderList();
 
         badInput.value = '';
@@ -664,12 +678,34 @@
         badInput.focus();
     }
 
+    function deleteTerm(keyToDelete) {
+        if (selectedNovelFilter === 'ALL') {
+            let list = [];
+            try { list = JSON.parse(GM_getValue(NOVEL_INDEX_KEY, '[]')); } catch (e) { list = []; }
+            list.forEach(k => {
+                const g = loadGlossaryForKey(k);
+                if (g[keyToDelete]) {
+                    delete g[keyToDelete];
+                    GM_setValue(k, JSON.stringify(g));
+                }
+            });
+        } else {
+            const targetGlossary = loadGlossaryForKey(selectedNovelFilter);
+            delete targetGlossary[keyToDelete];
+            GM_setValue(selectedNovelFilter, JSON.stringify(targetGlossary));
+        }
+
+        updateRegexRules();
+        if (isEngineActive) runReplacement();
+        renderList();
+    }
+
     // ==========================================
     // BACKUP ENGINE (EXPORT / IMPORT)
     // ==========================================
     function exportGlossary(scope) {
         if (scope === 'CURRENT') {
-            const targetKey = (selectedNovelFilter === 'ALL') ? CURRENT_STORAGE_KEY : selectedNovelFilter;
+            const targetKey = getTargetSaveKey();
             const glossary = loadGlossaryForKey(targetKey);
 
             if (Object.keys(glossary).length === 0) {
@@ -717,9 +753,10 @@
 
                 if (activeImportScope === 'CURRENT') {
                     if (typeof importedData === 'object' && importedData !== null && !Array.isArray(importedData) && !importedData._type) {
-                        const glossary = loadGlossaryForKey(CURRENT_STORAGE_KEY);
+                        const targetKey = getTargetSaveKey();
+                        const glossary = loadGlossaryForKey(targetKey);
                         const mergedGlossary = { ...glossary, ...importedData };
-                        GM_setValue(CURRENT_STORAGE_KEY, JSON.stringify(mergedGlossary));
+                        GM_setValue(targetKey, JSON.stringify(mergedGlossary));
                         updateRegexRules();
                         if (isEngineActive) runReplacement();
                         renderList();
