@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         YouTube East Asian Title & Channel Translator
 // @namespace    http://tampermonkey.net/
-// @version      1.5
+// @version      1.6
 // @description  Translates Chinese, Japanese, and Korean video titles and channel names to English when hovering.
 // @author       Your Name
 // @match        https://www.youtube.com/*
 // @grant        GM.xmlHttpRequest
 // @connect      translate.googleapis.com
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/YouTube East Asian Title & Channel Translator.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/YouTube East Asian Title & Channel Translator.js
 // ==/UserScript==
 
 (function() {
@@ -19,73 +17,87 @@
     const eastAsianRegex = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\uac00-\ud7af]/;
     const translationCache = new Map();
 
-    // Selectors for top-level video containers (cards, sidebar list items, and main watch page metadata)
     const cardSelectors = 'ytd-rich-item-renderer, ytd-rich-grid-media, ytd-video-renderer, ytd-compact-video-renderer, yt-lockup-view-model, ytd-watch-metadata';
-
-    // Selectors for video titles (includes cards, feed items, and main watch page title)
     const titleSelectors = '.ytLockupMetadataViewModelTitle, #video-title, #video-title-link, ytd-watch-metadata #title yt-formatted-string, h1.ytd-watch-metadata, #title.ytd-watch-metadata';
-
-    // Selectors for channel names (handles home grid, sidebar, standard layout, and main watch page channel)
     const channelSelectors = '.ytContentMetadataViewModelMetadataRow a, #channel-name, #text.ytd-channel-name, #upload-info #channel-name';
 
-    function translateText(text, element) {
+    function fetchTranslation(text) {
         if (translationCache.has(text)) {
-            element.textContent = translationCache.get(text);
-            return;
+            return Promise.resolve(translationCache.get(text));
         }
 
         const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=en&dt=t&q=${encodeURIComponent(text)}`;
 
-        GM.xmlHttpRequest({
-            method: "GET",
-            url: url,
-            onload: function(response) {
-                try {
-                    const result = JSON.parse(response.responseText);
-                    if (result && result[0]) {
-                        let translatedText = result[0].map(segment => segment[0]).join('');
-                        if (translatedText) {
+        return new Promise((resolve) => {
+            GM.xmlHttpRequest({
+                method: "GET",
+                url: url,
+                onload: function(response) {
+                    try {
+                        const result = JSON.parse(response.responseText);
+                        if (result && result[0]) {
+                            let translatedText = result[0].map(segment => segment[0]).join('');
                             translationCache.set(text, translatedText);
-                            element.textContent = translatedText;
-                            element.setAttribute('data-translated', 'true');
-
-                            // Keep deep nested spans or formatted string children updated if they exist
-                            const innerSpan = element.querySelector('span, yt-formatted-string');
-                            if (innerSpan) {
-                                innerSpan.textContent = translatedText;
-                            }
+                            resolve(translatedText);
+                            return;
                         }
+                    } catch (e) {
+                        console.error("Translation error:", e);
                     }
-                } catch (e) {
-                    console.error("Translation error:", e);
-                }
-            }
+                    resolve(text);
+                },
+                onerror: () => resolve(text)
+            });
         });
     }
 
-    // Helper to run translation checks on an element
-    function checkAndTranslate(element) {
+    // Process string in segments to prevent translation skips on complex titles
+    async function translateSegmentedText(fullText) {
+        // Split by structural symbols/brackets while keeping delimiters
+        const parts = fullText.split(/([♡|【】│/\\()\[\]]+)/g);
+        const translatedParts = await Promise.all(parts.map(async (part) => {
+            if (eastAsianRegex.test(part)) {
+                return await fetchTranslation(part);
+            }
+            return part;
+        }));
+        return translatedParts.join('');
+    }
+
+    function updateTextPreservingStructure(element, newText) {
+        // Target deepest formatted string or span if available to maintain font styles
+        const targetNode = element.querySelector('yt-formatted-string, span') || element;
+        
+        // Update first Child Node directly to avoid breaking nested structural elements
+        if (targetNode.firstChild && targetNode.firstChild.nodeType === Node.TEXT_NODE) {
+            targetNode.firstChild.nodeValue = newText;
+        } else {
+            targetNode.textContent = newText;
+        }
+    }
+
+    async function checkAndTranslate(element) {
         if (!element || element.hasAttribute('data-translated')) return;
 
         const originalText = element.textContent.trim();
         if (eastAsianRegex.test(originalText)) {
             element.setAttribute('data-translated', 'pending');
-            translateText(originalText, element);
+            const translated = await translateSegmentedText(originalText);
+            
+            updateTextPreservingStructure(element, translated);
+            element.setAttribute('data-translated', 'true');
         }
     }
 
-    // Monitor global mouseover events
     document.addEventListener('mouseover', function(event) {
         const target = event.target;
 
-        // 1. Check if hovered directly on/inside a title or channel name
         let directTarget = target.closest(`${titleSelectors}, ${channelSelectors}`);
         if (directTarget) {
             checkAndTranslate(directTarget);
             return;
         }
 
-        // 2. If hovered on a card container/thumbnail/watch metadata container, grab BOTH title and channel
         const cardEl = target.closest(cardSelectors);
         if (cardEl) {
             const titleEl = cardEl.querySelector(titleSelectors);
