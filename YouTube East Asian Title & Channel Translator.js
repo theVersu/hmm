@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         YouTube East Asian Title & Channel Translator
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Translates Chinese, Japanese, and Korean video titles and channel names to English when hovering.
 // @author       Your Name
 // @match        https://www.youtube.com/*
@@ -15,34 +15,22 @@
 (function() {
     'use strict';
 
-    // Regex checking for Chinese characters, Japanese (Hiragana/Katakana), and Korean (Hangul)
     const eastAsianRegex = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff66-\uff9f\uac00-\ud7af]/;
     const translationCache = new Map();
-
-    const cardSelectors = [
-        'ytd-rich-item-renderer',
-        'ytd-rich-grid-media',
-        'ytd-video-renderer',
-        'ytd-compact-video-renderer',
-        'yt-lockup-view-model',
-        'ytd-watch-metadata'
-    ].join(', ');
 
     const titleSelectors = [
         '.ytLockupMetadataViewModelTitle',
         '#video-title',
         '#video-title-link',
         'h1.ytd-watch-metadata',
-        '#title.ytd-watch-metadata',
-        'ytd-watch-metadata h1 yt-formatted-string'
+        '#title.ytd-watch-metadata'
     ].join(', ');
 
     const channelSelectors = [
-        '.ytContentMetadataViewModelMetadataRow a',
-        '#channel-name',
+        '#channel-name a',
         '#text.ytd-channel-name',
-        '#upload-info #channel-name',
-        'ytd-channel-name #text'
+        'ytd-channel-name a',
+        '.ytContentMetadataViewModelMetadataRow a'
     ].join(', ');
 
     function fetchTranslation(text) {
@@ -86,12 +74,28 @@
         return translatedParts.join('');
     }
 
-    function updateTextPreservingStructure(element, newText) {
-        const targetNode = element.querySelector('yt-formatted-string, span, yt-core-attributed-string') || element;
+    // Helper to extract clean text without duplicate child badge strings
+    function getDirectTextContent(element) {
+        const target = element.querySelector('yt-core-attributed-string, yt-formatted-string, span') || element;
+        return target.innerText ? target.innerText.trim() : target.textContent.trim();
+    }
 
-        if (targetNode.firstChild && targetNode.firstChild.nodeType === Node.TEXT_NODE) {
-            targetNode.firstChild.nodeValue = newText;
-        } else {
+    function updateTextPreservingStructure(element, newText) {
+        // Find the specific visible text node or component to avoid touching child badges
+        const targetNode = element.querySelector('yt-core-attributed-string, yt-formatted-string, span') || element;
+        
+        // If there's an internal child text node, modify only that node
+        let textNodeFound = false;
+        for (let child of targetNode.childNodes) {
+            if (child.nodeType === Node.TEXT_NODE && child.nodeValue.trim().length > 0) {
+                child.nodeValue = newText;
+                textNodeFound = true;
+                break;
+            }
+        }
+        
+        // Fallback for custom web components without simple text child nodes
+        if (!textNodeFound) {
             targetNode.textContent = newText;
         }
     }
@@ -99,7 +103,7 @@
     async function checkAndTranslate(element) {
         if (!element || element.getAttribute('data-translated')) return;
 
-        const originalText = element.textContent.trim();
+        const originalText = getDirectTextContent(element);
         if (eastAsianRegex.test(originalText)) {
             element.setAttribute('data-translated', 'pending');
             const translated = await translateSegmentedText(originalText);
@@ -113,19 +117,9 @@
         const target = event.target;
         if (!target) return;
 
-        let directTarget = target.closest(`${titleSelectors}, ${channelSelectors}`);
-        if (directTarget) {
-            checkAndTranslate(directTarget);
-            return;
-        }
-
-        const cardEl = target.closest(cardSelectors);
-        if (cardEl) {
-            const titleEl = cardEl.querySelector(titleSelectors);
-            const channelEl = cardEl.querySelector(channelSelectors);
-
-            if (titleEl) checkAndTranslate(titleEl);
-            if (channelEl) checkAndTranslate(channelEl);
+        let el = target.closest(`${titleSelectors}, ${channelSelectors}`);
+        if (el) {
+            checkAndTranslate(el);
         }
     }, { passive: true });
 })();
