@@ -8,8 +8,8 @@
 // @grant        GM.xmlHttpRequest
 // @connect      translate.googleapis.com
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/YouTube East Asian Title & Channel Translator.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/YouTube East Asian Title & Channel Translator.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/YouTube%20East%20Asian%20Title%20%26%20Channel%20Translator.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/YouTube%20East%20Asian%20Title%20%26%20Channel%20Translator.js
 // ==/UserScript==
 
 (function() {
