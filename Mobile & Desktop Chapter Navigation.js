@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Mobile & Desktop Chapter Navigation
 // @namespace    http://tampermonkey.net/
-// @version      1.6
-// @description  Adds on-screen arrows for mobile and keyboard arrow shortcuts for PC to navigate novel chapters with rainbow effects.
+// @version      2.0
+// @description  Adds on-screen arrows for mobile and keyboard arrow shortcuts for PC with snake rainbow hover, internal heavy-press background visual, and guaranteed mouse/touch responsiveness.
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -37,7 +37,7 @@
         if (!active) return false;
 
         const tag = active.tagName.toUpperCase();
-        
+
         if (tag === 'TEXTAREA' || tag === 'INPUT') {
             const type = (active.type || '').toLowerCase();
             const nonTextTypes = ['button', 'submit', 'checkbox', 'radio', 'image', 'reset', 'range', 'color'];
@@ -49,10 +49,10 @@
         return false;
     }
 
-    // 3. UI Creation (On-Screen Buttons with Rainbow Hover & Stomp Effects)
+    // 3. UI Creation & Styling
     const container = document.createElement('div');
     container.id = 'vm-nav-buttons-container';
-    
+
     const style = document.createElement('style');
     style.textContent = `
         #vm-nav-buttons-container {
@@ -62,133 +62,158 @@
             transform: translateX(-50%);
             display: ${isEnabled ? 'flex' : 'none'};
             gap: 12px;
-            z-index: 999999;
+            z-index: 2147483647; /* Maximum possible z-index */
             pointer-events: none;
         }
-        
+
         .vm-nav-btn {
             position: relative;
-            pointer-events: auto;
+            pointer-events: auto !important;
             width: 65px;
             height: 42px;
-            background-color: rgba(30, 30, 30, 0.85);
+            background-color: #1c1d21;
             color: #ffffff;
-            border: 2px solid transparent;
             border-radius: 8px;
             display: flex;
             align-items: center;
             justify-content: center;
-            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
+            box-shadow: 0 6px 14px rgba(0, 0, 0, 0.4);
             backdrop-filter: blur(4px);
             user-select: none;
             -webkit-user-select: none;
-            touch-action: manipulation;
+            touch-action: none;
             cursor: pointer;
-            opacity: 0.25; /* Barely visible by default on desktop */
-            transition: opacity 0.2s ease, transform 0.1s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+            opacity: 0.35;
+            transition: opacity 0.2s ease, transform 0.1s cubic-bezier(0.2, 0.8, 0.2, 1), box-shadow 0.1s ease, background-color 0.2s ease;
             outline: none;
-            overflow: visible;
+            overflow: hidden;
+            border: none;
         }
 
-        /* Continuous Rotating Rainbow Gradient for Hover Border */
+        /* Snake Rainbow Line around the border */
         .vm-nav-btn::before {
             content: '';
             position: absolute;
-            top: -2px;
-            left: -2px;
-            right: -2px;
-            bottom: -2px;
-            border-radius: 10px;
-            background: linear-gradient(90deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #8b0083, #ff0000);
-            background-size: 300% 300%;
-            z-index: -1;
+            inset: 0;
+            border-radius: 8px;
+            padding: 2.5px;
+            background: conic-gradient(
+                from var(--border-angle, 0deg),
+                #ff0000,
+                #ff7f00,
+                #ffff00,
+                #00ff00,
+                #00ffff,
+                #0000ff,
+                #8b0083,
+                transparent 60%
+            );
+            -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            -webkit-mask-composite: xor;
+            mask-composite: exclude;
+            z-index: 2;
             opacity: 0;
             transition: opacity 0.2s ease;
-            animation: rainbowBorder 2s linear infinite;
+            pointer-events: none;
         }
 
-        @keyframes rainbowBorder {
-            0% { background-position: 0% 50%; }
-            50% { background-position: 100% 50%; }
-            100% { background-position: 0% 50%; }
+        @property --border-angle {
+            syntax: '<angle>';
+            initial-value: 0deg;
+            inherits: false;
         }
 
-        /* Hover effect for desktop/PC */
+        @keyframes snakeCoil {
+            to {
+                --border-angle: 360deg;
+            }
+        }
+
+        /* Hover Behavior */
         @media (hover: hover) {
             .vm-nav-btn:hover {
                 opacity: 1;
-                background-color: rgba(20, 20, 20, 0.95);
+                background-color: #121316;
             }
             .vm-nav-btn:hover::before {
                 opacity: 1;
+                animation: snakeCoil 1.2s linear infinite;
             }
         }
 
-        /* Keep fully visible on mobile/touch screens */
+        /* Mobile Visibility Fallback */
         @media (hover: none) {
             .vm-nav-btn {
                 opacity: 0.85;
             }
         }
 
-        /* Stomp / Pulse Animation on Click */
-        .vm-nav-btn.vm-stomp {
-            opacity: 1 !important;
-            animation: stompPulse 0.4s ease-out forwards;
+        /* Heavy Internal Weight Press Effect Layer */
+        .vm-nav-btn::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(circle at center,
+                rgba(255, 0, 128, 0.85) 0%,
+                rgba(0, 255, 255, 0.7) 35%,
+                rgba(255, 215, 0, 0.5) 60%,
+                rgba(0,0,0,0.9) 100%
+            );
+            opacity: 0;
+            z-index: 1;
+            pointer-events: none;
+            transform: scale(1.6);
+            transition: transform 0.15s ease-out, opacity 0.15s ease-out;
         }
 
-        @keyframes stompPulse {
-            0% {
-                transform: scale(0.85);
-                box-shadow: 0 0 0 0px rgba(255, 0, 128, 0.8),
-                            0 0 15px 5px rgba(0, 255, 255, 0.8);
-                background-color: rgba(60, 60, 60, 1);
-            }
-            50% {
-                transform: scale(1.15);
-                box-shadow: 0 0 25px 8px rgba(255, 255, 0, 0.9),
-                            0 0 35px 12px rgba(128, 0, 255, 0.7);
-                background-color: rgba(40, 40, 40, 0.9);
-            }
-            100% {
-                transform: scale(1);
-                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
-            }
+        /* Pressed State (Heavy Weight Simulation) */
+        .vm-nav-btn.vm-pressed {
+            opacity: 1 !important;
+            transform: translateY(3px) scale(0.91) !important;
+            box-shadow: inset 0 4px 10px rgba(0, 0, 0, 0.9), 0 1px 3px rgba(0, 0, 0, 0.5) !important;
+            background-color: #090a0c !important;
+        }
+
+        .vm-nav-btn.vm-pressed::after {
+            opacity: 1;
+            transform: scale(0.65);
         }
 
         .vm-nav-btn svg {
             width: 24px;
             height: 24px;
             fill: currentColor;
-            z-index: 1;
+            z-index: 3;
+            position: relative;
+            transition: transform 0.1s ease;
+            pointer-events: none;
+        }
+
+        .vm-nav-btn.vm-pressed svg {
+            transform: scale(0.85);
         }
     `;
     document.head.appendChild(style);
 
     const leftBtn = document.createElement('button');
     leftBtn.className = 'vm-nav-btn';
+    leftBtn.id = 'vm-nav-left';
     leftBtn.setAttribute('aria-label', 'Previous Chapter');
     leftBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/></svg>`;
 
     const rightBtn = document.createElement('button');
     rightBtn.className = 'vm-nav-btn';
+    rightBtn.id = 'vm-nav-right';
     rightBtn.setAttribute('aria-label', 'Next Chapter');
     rightBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/></svg>`;
 
     container.appendChild(leftBtn);
     container.appendChild(rightBtn);
-    document.body.appendChild(container);
 
-    // Helper to trigger the rainbow stomp animation
-    function triggerStompEffect(button) {
-        button.classList.remove('vm-stomp');
-        // Force reflow so the animation restarts if triggered repeatedly
-        void button.offsetWidth;
-        button.classList.add('vm-stomp');
-        setTimeout(() => button.classList.remove('vm-stomp'), 400);
-    }
+    // Mount to documentElement to avoid body shadow/DOM capture issues
+    (document.body || document.documentElement).appendChild(container);
 
-    // 4. Navigation Logic (Find and click "Previous" / "Next" links on the page)
+    // 4. Navigation & Link Detection Logic
     const prevKeywords = ['prev', 'previous', 'prior', 'chapter-prev', 'btn-prev', 'ch-prev', 'before', '‹', '«', '<-'];
     const nextKeywords = ['next', 'following', 'chapter-next', 'btn-next', 'ch-next', 'after', '›', '»', '->'];
 
@@ -207,11 +232,11 @@
             const rel = (link.getAttribute('rel') || '').toLowerCase();
             const aria = (link.getAttribute('aria-label') || '').toLowerCase();
 
-            const matches = keywords.some(kw => 
-                text === kw || 
+            const matches = keywords.some(kw =>
+                text === kw ||
                 rel === kw ||
                 aria.includes(kw) ||
-                className.includes(kw) || 
+                className.includes(kw) ||
                 id.includes(kw) ||
                 (text.length < 20 && text.includes(kw))
             );
@@ -240,33 +265,84 @@
         document.dispatchEvent(new KeyboardEvent('keyup', eventInit));
     }
 
-    // Button Click Actions
-    leftBtn.addEventListener('click', (e) => {
-        e.preventDefault();
+    function executeNavigation(type) {
         if (isEditingText()) return;
-        triggerStompEffect(leftBtn);
-        const found = findAndClickLink(prevKeywords);
-        if (!found) triggerArrowKey('ArrowLeft', 37);
-    });
+        if (type === 'left') {
+            const found = findAndClickLink(prevKeywords);
+            if (!found) triggerArrowKey('ArrowLeft', 37);
+        } else if (type === 'right') {
+            const found = findAndClickLink(nextKeywords);
+            if (!found) triggerArrowKey('ArrowRight', 39);
+        }
+    }
 
-    rightBtn.addEventListener('click', (e) => {
+    // 5. Global Capturing Press/Hold Engine (Bypasses web page event blocking)
+    let activePress = null;
+    let holdTimer = null;
+    let repeatInterval = null;
+
+    function startButtonPress(button, type) {
+        if (activePress || isEditingText()) return;
+        activePress = type;
+
+        button.classList.add('vm-pressed');
+        executeNavigation(type);
+
+        holdTimer = setTimeout(() => {
+            repeatInterval = setInterval(() => {
+                executeNavigation(type);
+            }, 200);
+        }, 400);
+    }
+
+    function stopButtonPress() {
+        if (!activePress) return;
+
+        leftBtn.classList.remove('vm-pressed');
+        rightBtn.classList.remove('vm-pressed');
+
+        if (holdTimer) clearTimeout(holdTimer);
+        if (repeatInterval) clearInterval(repeatInterval);
+
+        activePress = null;
+        holdTimer = null;
+        repeatInterval = null;
+    }
+
+    // Capture pointers directly at window phase to bypass page event blocking
+    window.addEventListener('pointerdown', (e) => {
+        const target = e.target.closest('.vm-nav-btn');
+        if (!target) return;
+
         e.preventDefault();
-        if (isEditingText()) return;
-        triggerStompEffect(rightBtn);
-        const found = findAndClickLink(nextKeywords);
-        if (!found) triggerArrowKey('ArrowRight', 39);
-    });
+        e.stopPropagation();
 
-    // 5. Desktop Keyboard Event Listener directly clicks the buttons
+        if (target.id === 'vm-nav-left') {
+            startButtonPress(leftBtn, 'left');
+        } else if (target.id === 'vm-nav-right') {
+            startButtonPress(rightBtn, 'right');
+        }
+    }, true);
+
+    window.addEventListener('pointerup', stopButtonPress, true);
+    window.addEventListener('pointercancel', stopButtonPress, true);
+
+    // 6. Keyboard Listeners Synced with Visual & Navigation Logic
     window.addEventListener('keydown', (e) => {
-        if (!isEnabled || isEditingText()) return;
+        if (!isEnabled || isEditingText() || e.repeat) return;
 
         if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft') {
             e.preventDefault();
-            leftBtn.click();
+            startButtonPress(leftBtn, 'left');
         } else if (e.key === 'ArrowRight' || e.code === 'ArrowRight') {
             e.preventDefault();
-            rightBtn.click();
+            startButtonPress(rightBtn, 'right');
+        }
+    }, true);
+
+    window.addEventListener('keyup', (e) => {
+        if (e.key === 'ArrowLeft' || e.code === 'ArrowLeft' || e.key === 'ArrowRight' || e.code === 'ArrowRight') {
+            stopButtonPress();
         }
     }, true);
 
