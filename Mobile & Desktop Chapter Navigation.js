@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         Mobile & Desktop Chapter Navigation
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  Adds on-screen arrows for mobile and keyboard arrow shortcuts for PC to navigate novel chapters.
+// @version      1.6
+// @description  Adds on-screen arrows for mobile and keyboard arrow shortcuts for PC to navigate novel chapters with rainbow effects.
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile & Desktop Chapter Navigation.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile & Desktop Chapter Navigation.js
 // ==/UserScript==
 
 (function() {
@@ -37,7 +35,7 @@
         if (!active) return false;
 
         const tag = active.tagName.toUpperCase();
-
+        
         if (tag === 'TEXTAREA' || tag === 'INPUT') {
             const type = (active.type || '').toLowerCase();
             const nonTextTypes = ['button', 'submit', 'checkbox', 'radio', 'image', 'reset', 'range', 'color'];
@@ -49,10 +47,10 @@
         return false;
     }
 
-    // 3. UI Creation (On-Screen Buttons with Hover Transparency)
+    // 3. UI Creation (On-Screen Buttons with Rainbow Hover & Stomp Effects)
     const container = document.createElement('div');
     container.id = 'vm-nav-buttons-container';
-
+    
     const style = document.createElement('style');
     style.textContent = `
         #vm-nav-buttons-container {
@@ -65,13 +63,15 @@
             z-index: 999999;
             pointer-events: none;
         }
+        
         .vm-nav-btn {
+            position: relative;
             pointer-events: auto;
             width: 65px;
             height: 42px;
             background-color: rgba(30, 30, 30, 0.85);
             color: #ffffff;
-            border: 1px solid rgba(255, 255, 255, 0.2);
+            border: 2px solid transparent;
             border-radius: 8px;
             display: flex;
             align-items: center;
@@ -83,28 +83,74 @@
             touch-action: manipulation;
             cursor: pointer;
             opacity: 0.25; /* Barely visible by default on desktop */
-            transition: opacity 0.2s ease, transform 0.1s ease, background-color 0.2s ease;
+            transition: opacity 0.2s ease, transform 0.1s ease, background-color 0.2s ease, box-shadow 0.2s ease;
+            outline: none;
+            overflow: visible;
+        }
+
+        /* Continuous Rotating Rainbow Gradient for Hover Border */
+        .vm-nav-btn::before {
+            content: '';
+            position: absolute;
+            top: -2px;
+            left: -2px;
+            right: -2px;
+            bottom: -2px;
+            border-radius: 10px;
+            background: linear-gradient(90deg, #ff0000, #ff7f00, #ffff00, #00ff00, #0000ff, #4b0082, #8b0083, #ff0000);
+            background-size: 300% 300%;
+            z-index: -1;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            animation: rainbowBorder 2s linear infinite;
+        }
+
+        @keyframes rainbowBorder {
+            0% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+            100% { background-position: 0% 50%; }
         }
 
         /* Hover effect for desktop/PC */
         @media (hover: hover) {
             .vm-nav-btn:hover {
-                opacity: 1; /* Fully visible on hover */
-                background-color: rgba(45, 45, 45, 0.95);
+                opacity: 1;
+                background-color: rgba(20, 20, 20, 0.95);
+            }
+            .vm-nav-btn:hover::before {
+                opacity: 1;
             }
         }
 
-        /* Active click state */
-        .vm-nav-btn:active {
-            opacity: 1;
-            background-color: rgba(70, 70, 70, 0.95);
-            transform: scale(0.95);
-        }
-
-        /* Keep fully visible on mobile/touch screens since hover doesn't exist */
+        /* Keep fully visible on mobile/touch screens */
         @media (hover: none) {
             .vm-nav-btn {
                 opacity: 0.85;
+            }
+        }
+
+        /* Stomp / Pulse Animation on Click */
+        .vm-nav-btn.vm-stomp {
+            opacity: 1 !important;
+            animation: stompPulse 0.4s ease-out forwards;
+        }
+
+        @keyframes stompPulse {
+            0% {
+                transform: scale(0.85);
+                box-shadow: 0 0 0 0px rgba(255, 0, 128, 0.8),
+                            0 0 15px 5px rgba(0, 255, 255, 0.8);
+                background-color: rgba(60, 60, 60, 1);
+            }
+            50% {
+                transform: scale(1.15);
+                box-shadow: 0 0 25px 8px rgba(255, 255, 0, 0.9),
+                            0 0 35px 12px rgba(128, 0, 255, 0.7);
+                background-color: rgba(40, 40, 40, 0.9);
+            }
+            100% {
+                transform: scale(1);
+                box-shadow: 0 4px 10px rgba(0, 0, 0, 0.3);
             }
         }
 
@@ -112,6 +158,7 @@
             width: 24px;
             height: 24px;
             fill: currentColor;
+            z-index: 1;
         }
     `;
     document.head.appendChild(style);
@@ -129,6 +176,15 @@
     container.appendChild(leftBtn);
     container.appendChild(rightBtn);
     document.body.appendChild(container);
+
+    // Helper to trigger the rainbow stomp animation
+    function triggerStompEffect(button) {
+        button.classList.remove('vm-stomp');
+        // Force reflow so the animation restarts if triggered repeatedly
+        void button.offsetWidth;
+        button.classList.add('vm-stomp');
+        setTimeout(() => button.classList.remove('vm-stomp'), 400);
+    }
 
     // 4. Navigation Logic (Find and click "Previous" / "Next" links on the page)
     const prevKeywords = ['prev', 'previous', 'prior', 'chapter-prev', 'btn-prev', 'ch-prev', 'before', '‹', '«', '<-'];
@@ -149,11 +205,11 @@
             const rel = (link.getAttribute('rel') || '').toLowerCase();
             const aria = (link.getAttribute('aria-label') || '').toLowerCase();
 
-            const matches = keywords.some(kw =>
-                text === kw ||
+            const matches = keywords.some(kw => 
+                text === kw || 
                 rel === kw ||
                 aria.includes(kw) ||
-                className.includes(kw) ||
+                className.includes(kw) || 
                 id.includes(kw) ||
                 (text.length < 20 && text.includes(kw))
             );
@@ -186,6 +242,7 @@
     leftBtn.addEventListener('click', (e) => {
         e.preventDefault();
         if (isEditingText()) return;
+        triggerStompEffect(leftBtn);
         const found = findAndClickLink(prevKeywords);
         if (!found) triggerArrowKey('ArrowLeft', 37);
     });
@@ -193,6 +250,7 @@
     rightBtn.addEventListener('click', (e) => {
         e.preventDefault();
         if (isEditingText()) return;
+        triggerStompEffect(rightBtn);
         const found = findAndClickLink(nextKeywords);
         if (!found) triggerArrowKey('ArrowRight', 39);
     });
