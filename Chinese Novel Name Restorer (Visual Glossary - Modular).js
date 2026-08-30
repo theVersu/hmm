@@ -1,17 +1,18 @@
 // ==UserScript==
 // @name         Chinese Novel Name Restorer (Visual Glossary - Modular)
 // @namespace    http://tampermonkey.net/
-// @version      4.0.1
+// @version      4.0.2
 // @description  Adds multi-novel dropdown support, tabbed categories, scoped import/export, modular per-entry rule toggles (Name-safe, On/Off), and hotkey blocking.
 // @author       You
 // @match        https://*.mvlempyr.io/*
 // @match        https://wtr-lab.com/*
+// @match        https://crimsonscrolls.net/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Chinese Novel Name Restorer (Visual Glossary - Modular).js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Chinese Novel Name Restorer (Visual Glossary - Modular).js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Chinese%20Novel%20Name%20Restorer%20(Visual%20Glossary%20-%20Modular).js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Chinese%20Novel%20Name%20Restorer%20(Visual%20Glossary%20-%20Modular).js
 // ==/UserScript==
 
 (function() {
@@ -59,9 +60,10 @@
 
         const isWtrNovel = /^glossary_wtr_\d+$/.test(key);
         const isMvlempyrNovel = /^glossary_mvlempyr_\d+$/.test(key);
+        const isCrimsonNovel = /^glossary_crimson_[a-zA-Z0-9_-]+$/.test(key);
         const isSeriesNovel = /^glossary_series_[a-zA-Z0-9_-]+$/.test(key);
 
-        return isWtrNovel || isMvlempyrNovel || isSeriesNovel;
+        return isWtrNovel || isMvlempyrNovel || isCrimsonNovel || isSeriesNovel;
     }
 
     function getCurrentNovelKey() {
@@ -72,6 +74,9 @@
 
         const mvlempyrMatch = url.match(/\/chapter\/(\d+)-\d+/i);
         if (mvlempyrMatch && mvlempyrMatch[1]) return `glossary_mvlempyr_${mvlempyrMatch[1]}`;
+
+        const crimsonMatch = url.match(/crimsonscrolls\.net\/novel\/([a-zA-Z0-9_-]+)/i);
+        if (crimsonMatch && crimsonMatch[1]) return `glossary_crimson_${crimsonMatch[1]}`;
 
         const genericMatch = url.match(/(?:\/book\/|\/novel\/|\/series\/)([a-zA-Z0-9_-]+)/i);
         if (genericMatch && genericMatch[1]) return `glossary_series_${genericMatch[1]}`;
