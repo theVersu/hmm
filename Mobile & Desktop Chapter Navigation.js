@@ -8,8 +8,8 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile & Desktop Chapter Navigation.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile & Desktop Chapter Navigation.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile%20%26%20Desktop%20Chapter%20Navigation.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile%20%26%20Desktop%20Chapter%20Navigation.js
 // ==/UserScript==
 
 (function() {
