@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Chinese Novel Name Restorer (Visual Glossary - Modular)
 // @namespace    http://tampermonkey.net/
-// @version      4.0.2
+// @version      4.0.3
 // @description  Adds multi-novel dropdown support, tabbed categories, scoped import/export, modular per-entry rule toggles (Name-safe, On/Off), and hotkey blocking.
 // @author       You
 // @match        https://*.mvlempyr.io/*
@@ -356,6 +356,11 @@
                 #glossary-panel-container:hover {
                     opacity: 1.0;
                 }
+                @media (pointer: coarse), (max-width: 768px) {
+                    #glossary-panel-container {
+                        opacity: 1.0 !important;
+                    }
+                }
                 #glossary-panel-container * { box-sizing: border-box; }
                 .gl-header {
                     padding: 10px 14px;
@@ -432,9 +437,10 @@
                 }
                 .gl-inputs {
                     display: flex;
-                    gap: 8px;
+                    gap: 6px;
                     margin-bottom: 12px;
                     width: 100%;
+                    align-items: center;
                 }
                 .gl-inputs input {
                     flex: 1;
@@ -461,6 +467,23 @@
                     flex-shrink: 0;
                 }
                 .gl-inputs button:hover { background: #1d4ed8; }
+                .gl-reset-btn {
+                    background: #27272a;
+                    border: 1px solid #3f3f46;
+                    color: #a1a1aa;
+                    border-radius: 6px;
+                    padding: 6px 8px;
+                    font-size: 14px;
+                    cursor: pointer;
+                    line-height: 1;
+                    flex-shrink: 0;
+                    transition: all 0.15s;
+                }
+                .gl-reset-btn:hover {
+                    background: #3f3f46;
+                    color: #f43f5e;
+                    border-color: #f43f5e;
+                }
                 .gl-list {
                     max-height: 200px;
                     overflow-y: auto;
@@ -490,6 +513,22 @@
                     flex-grow: 1;
                 }
                 .gl-arrow { color: #60a5fa; margin: 0 4px; font-weight: bold; }
+
+                .gl-copy-btn {
+                    background: none;
+                    border: none;
+                    color: #38bdf8;
+                    cursor: pointer;
+                    font-size: 13px;
+                    line-height: 1;
+                    padding: 0 4px;
+                    flex-shrink: 0;
+                    transition: transform 0.1s;
+                }
+                .gl-copy-btn:hover {
+                    color: #7dd3fc;
+                    transform: scale(1.15);
+                }
 
                 .gl-modules-wrapper {
                     display: flex;
@@ -582,6 +621,7 @@
 
             <div class="gl-body">
                 <div class="gl-inputs">
+                    <button class="gl-reset-btn" id="gl-reset-inputs-btn" title="Clear textboxes">🧹</button>
                     <input type="text" id="gl-input-bad" placeholder="Chinese Raw Term">
                     <input type="text" id="gl-input-good" placeholder="Target Term">
                     <button id="gl-add-btn">Add</button>
@@ -635,6 +675,12 @@
             tabCN.classList.remove('active');
             document.getElementById('gl-input-bad').placeholder = "English Raw Name / Unit / Hash";
             renderList();
+        });
+
+        document.getElementById('gl-reset-inputs-btn').addEventListener('click', () => {
+            document.getElementById('gl-input-bad').value = '';
+            document.getElementById('gl-input-good').value = '';
+            document.getElementById('gl-input-bad').focus();
         });
 
         document.getElementById('gl-add-btn').addEventListener('click', addNewPair);
@@ -735,6 +781,7 @@
             modulesHtml += '</div>';
 
             item.innerHTML = `
+                <button class="gl-copy-btn" data-bad="${badName}" data-good="${ruleObj.target}" title="Copy into input boxes">📝</button>
                 <span class="gl-item-text" title="${badName} to ${ruleObj.target}">
                     <strong>${badName}</strong> <span class="gl-arrow">&rarr;</span> <strong>${ruleObj.target}</strong>
                 </span>
@@ -742,6 +789,16 @@
                 <button class="gl-delete" data-key="${badName}">&times;</button>
             `;
             listContainer.appendChild(item);
+        });
+
+        listContainer.querySelectorAll('.gl-copy-btn').forEach(btn => {
+            btn.addEventListener('click', function() {
+                const badVal = this.getAttribute('data-bad');
+                const goodVal = this.getAttribute('data-good');
+                document.getElementById('gl-input-bad').value = badVal;
+                document.getElementById('gl-input-good').value = goodVal;
+                document.getElementById('gl-input-bad').focus();
+            });
         });
 
         listContainer.querySelectorAll('.gl-mod-btn').forEach(btn => {
