@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         Mobile & Desktop Chapter Navigation
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Adds on-screen arrows for mobile and keyboard arrow shortcuts for PC with snake rainbow hover, internal heavy-press background visual, and guaranteed mouse/touch responsiveness.
+// @version      2.2
+// @description  Adds on-screen arrows for mobile and keyboard arrow shortcuts for PC. Defaults to OFF with clean single per-site toggle.
 // @match        *://*/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-end
 // @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Mobile%20%26%20Desktop%20Chapter%20Navigation.js
@@ -15,15 +16,37 @@
 (function() {
     'use strict';
 
-    // 1. Persistent State Management
-    let isEnabled = GM_getValue('nav_buttons_enabled', true);
+    // Prevent iframe duplicate registrations (only run in the primary top window)
+    if (window.self !== window.top) return;
+
+    // 1. Domain-Based Persistent State Management
+    const currentHost = location.hostname;
+    let enabledHosts = GM_getValue('nav_enabled_hosts', {});
+
+    // Legacy data migration support
+    const legacySetting = GM_getValue('nav_buttons_enabled', null);
+    if (legacySetting !== null) {
+        if (legacySetting === true) {
+            enabledHosts[currentHost] = true;
+            GM_setValue('nav_enabled_hosts', enabledHosts);
+        }
+        GM_deleteValue('nav_buttons_enabled');
+    }
+
+    // Default state is false unless the domain is explicitly enabled
+    let isEnabled = !!enabledHosts[currentHost];
 
     function updateMenuCommand() {
         GM_registerMenuCommand(
-            `${isEnabled ? '✅ Enabled' : '❌ Disabled'} - Toggle Nav Script`,
+            `${isEnabled ? '✅ Enabled' : '❌ Disabled'} for ${currentHost}`,
             () => {
                 isEnabled = !isEnabled;
-                GM_setValue('nav_buttons_enabled', isEnabled);
+                if (isEnabled) {
+                    enabledHosts[currentHost] = true;
+                } else {
+                    delete enabledHosts[currentHost];
+                }
+                GM_setValue('nav_enabled_hosts', enabledHosts);
                 toggleButtonsVisibility();
                 location.reload();
             }
@@ -62,7 +85,7 @@
             transform: translateX(-50%);
             display: ${isEnabled ? 'flex' : 'none'};
             gap: 12px;
-            z-index: 2147483647; /* Maximum possible z-index */
+            z-index: 2147483647;
             pointer-events: none;
         }
 
@@ -210,7 +233,6 @@
     container.appendChild(leftBtn);
     container.appendChild(rightBtn);
 
-    // Mount to documentElement to avoid body shadow/DOM capture issues
     (document.body || document.documentElement).appendChild(container);
 
     // 4. Navigation & Link Detection Logic
@@ -266,7 +288,7 @@
     }
 
     function executeNavigation(type) {
-        if (isEditingText()) return;
+        if (!isEnabled || isEditingText()) return;
         if (type === 'left') {
             const found = findAndClickLink(prevKeywords);
             if (!found) triggerArrowKey('ArrowLeft', 37);
@@ -276,13 +298,13 @@
         }
     }
 
-    // 5. Global Capturing Press/Hold Engine (Bypasses web page event blocking)
+    // 5. Global Capturing Press/Hold Engine
     let activePress = null;
     let holdTimer = null;
     let repeatInterval = null;
 
     function startButtonPress(button, type) {
-        if (activePress || isEditingText()) return;
+        if (!isEnabled || activePress || isEditingText()) return;
         activePress = type;
 
         button.classList.add('vm-pressed');
@@ -309,8 +331,8 @@
         repeatInterval = null;
     }
 
-    // Capture pointers directly at window phase to bypass page event blocking
     window.addEventListener('pointerdown', (e) => {
+        if (!isEnabled) return;
         const target = e.target.closest('.vm-nav-btn');
         if (!target) return;
 
@@ -327,7 +349,7 @@
     window.addEventListener('pointerup', stopButtonPress, true);
     window.addEventListener('pointercancel', stopButtonPress, true);
 
-    // 6. Keyboard Listeners Synced with Visual & Navigation Logic
+    // 6. Keyboard Listeners
     window.addEventListener('keydown', (e) => {
         if (!isEnabled || isEditingText() || e.repeat) return;
 
