@@ -11,7 +11,9 @@
 // @match        *://pawchive.st/*
 // @match        *://www.pawchive.st/*
 // @grant        none
-// ==UserScript==
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
+// ==/UserScript==
 
 (function() {
     'use strict';
