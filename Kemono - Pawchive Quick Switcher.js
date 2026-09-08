@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Kemono - Pawchive Quick Switcher
 // @namespace    http://tampermonkey.net/
-// @version      1.1
+// @version      1.2
 // @description  Adds a floating bottom-left button to switch between Kemono.su/cr and Pawchive.pw while preserving the URL path.
 // @author       You
 // @match        *://kemono.cr/*
@@ -20,15 +20,12 @@
 
     const currentHost = window.location.hostname;
     
-    // Determine target domain and icon based on current host
+    // Determine target domain based on current host
     const isKemono = currentHost.includes('kemono');
-    
     const targetDomain = isKemono ? 'pawchive.pw' : 'kemono.cr';
     
-    // Favicons for the target websites
-    const targetFavicon = isKemono 
-        ? 'https://pawchive.pw/favicon.ico' 
-        : 'https://kemono.cr/favicon.ico';
+    // Use Google's reliable favicon service to prevent 404/Cloudflare blocking
+    const targetFavicon = `https://www.google.com/s2/favicons?domain=${targetDomain}&sz=64`;
 
     // Create the button element
     const button = document.createElement('a');
@@ -91,12 +88,25 @@
         button.style.borderColor = '#4e5058';
     });
 
-    // Append button to the page once DOM is ready
-    if (document.body) {
-        document.body.appendChild(button);
-    } else {
-        window.addEventListener('DOMContentLoaded', () => {
+    // Attach button safely across static and dynamically loaded pages
+    function initButton() {
+        if (document.body && !document.getElementById('domain-switcher-btn')) {
             document.body.appendChild(button);
-        });
+        }
     }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initButton);
+    } else {
+        initButton();
+    }
+
+    // Observer fallback for single-page dynamic app renders
+    const observer = new MutationObserver(() => {
+        if (document.body && !document.getElementById('domain-switcher-btn')) {
+            document.body.appendChild(button);
+        }
+    });
+
+    observer.observe(document.documentElement, { childList: true, subtree: true });
 })();
