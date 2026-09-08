@@ -1,36 +1,42 @@
 // ==UserScript==
-// @name         Kemono - Pawchive Quick Switcher
-// @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  Adds a floating bottom-left button to switch between Kemono.su/cr and Pawchive.pw while preserving the URL path.
-// @author       You
-// @match        *://kemono.cr/*
-// @match        *://www.kemono.cr/*
-// @match        *://kemono.su/*
-// @match        *://www.kemono.su/*
-// @match        *://pawchive.pw/*
-// @match        *://www.pawchive.pw/*
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
-// @grant        none
-// ==UserScript==
+// @name        Kemono - Pawchive Quick Switcher
+// @namespace   Violentmonkey Scripts
+// @icon
+// @version     1.2
+//
+// @match       *://kemono.cr/*
+// @match       *://www.kemono.cr/*
+// @match       *://kemono.su/*
+// @match       *://www.kemono.su/*
+// @match       *://pawchive.pw/*
+// @match       *://www.pawchive.pw/*
+// @grant       none
+//
+// @author      You
+// @description Adds a floating bottom-left button to switch between Kemono.su/cr and Pawchive.pw while preserving the URL path.
+// @updateURL   https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
+// @downloadURL https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
+// ==/UserScript==
 
 (function() {
     'use strict';
 
     const currentHost = window.location.hostname;
-    
-    // Determine target domain based on current host
+
+    // Determine target domain and icon based on current host
     const isKemono = currentHost.includes('kemono');
+
     const targetDomain = isKemono ? 'pawchive.pw' : 'kemono.cr';
-    
-    // Use Google's reliable favicon service to prevent 404/Cloudflare blocking
-    const targetFavicon = `https://www.google.com/s2/favicons?domain=${targetDomain}&sz=64`;
+
+    // Favicons for the target websites
+    const targetFavicon = isKemono
+        ? 'https://pawchive.pw/favicon.ico'
+        : 'https://kemono.cr/favicon.ico';
 
     // Create the button element
     const button = document.createElement('a');
     button.id = 'domain-switcher-btn';
-    
+
     // Construct target URL using current path, search parameters, and hash
     button.href = `https://${targetDomain}${window.location.pathname}${window.location.search}${window.location.hash}`;
     button.title = `Switch to ${targetDomain}`;
@@ -58,7 +64,7 @@
     const icon = document.createElement('img');
     icon.src = targetFavicon;
     icon.alt = targetDomain;
-    
+
     Object.assign(icon.style, {
         width: '24px',
         height: '24px',
@@ -82,31 +88,18 @@
         button.style.transform = 'scale(1.1)';
         button.style.borderColor = '#00afff';
     });
-    
+
     button.addEventListener('mouseleave', () => {
         button.style.transform = 'scale(1)';
         button.style.borderColor = '#4e5058';
     });
 
-    // Attach button safely across static and dynamically loaded pages
-    function initButton() {
-        if (document.body && !document.getElementById('domain-switcher-btn')) {
-            document.body.appendChild(button);
-        }
-    }
-
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initButton);
+    // Append button to the page once DOM is ready
+    if (document.body) {
+        document.body.appendChild(button);
     } else {
-        initButton();
-    }
-
-    // Observer fallback for single-page dynamic app renders
-    const observer = new MutationObserver(() => {
-        if (document.body && !document.getElementById('domain-switcher-btn')) {
+        window.addEventListener('DOMContentLoaded', () => {
             document.body.appendChild(button);
-        }
-    });
-
-    observer.observe(document.documentElement, { childList: true, subtree: true });
+        });
+    }
 })();
