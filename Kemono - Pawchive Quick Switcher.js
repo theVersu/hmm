@@ -2,18 +2,18 @@
 // @name         Kemono - Pawchive Quick Switcher
 // @namespace    http://tampermonkey.net/
 // @version      1.1
-// @description  Adds a floating bottom-left button to switch between Kemono.su/cr and Pawchive.st while preserving the URL path.
+// @description  Adds a floating bottom-left button to switch between Kemono.su/cr and Pawchive.pw while preserving the URL path.
 // @author       You
 // @match        *://kemono.cr/*
 // @match        *://www.kemono.cr/*
 // @match        *://kemono.su/*
 // @match        *://www.kemono.su/*
-// @match        *://pawchive.st/*
-// @match        *://www.pawchive.st/*
-// @grant        none
+// @match        *://pawchive.pw/*
+// @match        *://www.pawchive.pw/*
 // @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
 // @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Kemono%20-%20Pawchive%20Quick%20Switcher.js
-// ==/UserScript==
+// @grant        none
+// ==UserScript==
 
 (function() {
     'use strict';
@@ -23,11 +23,11 @@
     // Determine target domain and icon based on current host
     const isKemono = currentHost.includes('kemono');
     
-    const targetDomain = isKemono ? 'pawchive.st' : 'kemono.cr';
+    const targetDomain = isKemono ? 'pawchive.pw' : 'kemono.cr';
     
     // Favicons for the target websites
     const targetFavicon = isKemono 
-        ? 'https://pawchive.st/favicon.ico' 
+        ? 'https://pawchive.pw/favicon.ico' 
         : 'https://kemono.cr/favicon.ico';
 
     // Create the button element
@@ -45,7 +45,7 @@
         left: '20px',
         width: '45px',
         height: '45px',
-        backgroundColor: isKemono ? '#282b30' : '#1e1e24', // Subtle background color match
+        backgroundColor: isKemono ? '#282b30' : '#1e1e24',
         border: '2px solid #4e5058',
         borderRadius: '8px',
         display: 'flex',
@@ -65,7 +65,7 @@
     Object.assign(icon.style, {
         width: '24px',
         height: '24px',
-        pointerEvents: 'none' // Prevents icon from intercepting drag/clicks
+        pointerEvents: 'none'
     });
 
     // Fallback if favicon fails to load (shows first letter of target site)
