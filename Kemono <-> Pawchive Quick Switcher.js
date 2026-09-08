@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         Kemono <-> Pawchive Quick Switcher
+// @name         Kemono - Pawchive Quick Switcher
 // @namespace    http://tampermonkey.net/
 // @version      1.0
 // @description  Adds a floating bottom-left button to switch between Kemono.su/cr and Pawchive.st while preserving the URL path.
