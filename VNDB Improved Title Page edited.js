@@ -9,8 +9,8 @@
 // @match        https://vndb.org/v*
 // @grant        GM_addStyle
 // @run-at       document-end
-// @downloadURL https://update.greasyfork.org/scripts/554071/VNDB%3ARe%20%E2%80%94%20Improved%20Title%20Page.user.js
-// @updateURL https://update.greasyfork.org/scripts/554071/VNDB%3ARe%20%E2%80%94%20Improved%20Title%20Page.meta.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/VNDB%20Improved%20Title%20Page%20edited.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/VNDB%20Improved%20Title%20Page%20edited.js
 // ==/UserScript==
 
 (function() {
