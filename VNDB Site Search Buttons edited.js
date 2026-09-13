@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         VNDB Site Search Buttons edited
 // @namespace    https://greasyfork.org/users/1071569
-// @version      1.5.2
+// @version      1.5.3
 // @description  Adds Google exact-phrase search buttons on VNDB visual novel pages for f95zone.to, www.ryuugames.com, www.anime-sharing.com, and store.steampowered.com. Compatible with VNDBRe — Improved Title Page.
-// @author       FunkyJustin, Gemini
+// @author       FunkyJustin
 // @license      MIT
 // @match        https://vndb.org/v*
 // @grant        none
@@ -15,7 +15,7 @@
 (function () {
     'use strict';
 
-    if (!/^\/v\d+$/.test(location.pathname)) return;
+    if (!/^\/v\d+(\/.*)?$/.test(location.pathname)) return;
 
     function initSearchButtons() {
         if (document.getElementById('vndb-site-search-buttons-container')) return;
