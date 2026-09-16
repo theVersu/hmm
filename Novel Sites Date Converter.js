@@ -11,6 +11,8 @@
 // @match        *://*.novelarrow.com/*
 // @run-at       document-end
 // @grant        none
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Sites%20Date%20Converter.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Sites%20Date%20Converter.js
 // ==/UserScript==
 
 (function () {
