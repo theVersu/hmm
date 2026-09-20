@@ -2,7 +2,7 @@
 // @name         Fast Scroll To Top
 // @namespace    violentmonkey.scroll.top
 // @version      1.1
-// @description  Lightweight, optimized fixed button to scroll to top.
+// @description  Zero-conflict, Canvas-rendered scroll-to-top button.
 // @match        *://*/*
 // @grant        none
 // @run-at       document-end
@@ -13,85 +13,87 @@
 (function () {
   'use strict';
 
-  // Create style element directly
-  const style = document.createElement('style');
-  style.textContent = `
-    #vm-scroll-top-btn, #vm-scroll-top-btn * {
-      box-sizing: border-box !important;
-      margin: 0 !important;
-      padding: 0 !important;
-      max-width: none !important;
-      max-height: none !important;
-    }
-    #vm-scroll-top-btn {
-      position: fixed !important;
-      bottom: 20px !important;
-      left: 20px !important;
-      width: 36px !important;
-      height: 36px !important;
-      min-width: 36px !important;
-      min-height: 36px !important;
-      border-radius: 50% !important;
-      background-color: rgba(30, 30, 30, 0.75) !important;
-      color: #ffffff !important;
-      border: none !important;
-      outline: none !important;
-      cursor: pointer !important;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3) !important;
-      z-index: 2147483647 !important;
-      opacity: 0 !important;
-      visibility: hidden !important;
-      transform: scale(0.8) !important;
-      transition: opacity 0.2s ease, transform 0.2s ease, visibility 0.2s !important;
-      backdrop-filter: blur(4px) !important;
-      will-change: opacity, transform !important;
-      pointer-events: none !important;
-    }
-    #vm-scroll-top-btn.visible {
-      opacity: 1 !important;
-      visibility: visible !important;
-      transform: scale(1) !important;
-      pointer-events: auto !important;
-    }
-    #vm-scroll-top-btn:hover {
-      background-color: rgba(0, 0, 0, 0.9) !important;
-      transform: scale(1.1) !important;
-    }
-    #vm-scroll-top-btn svg {
-      width: 18px !important;
-      height: 18px !important;
-      min-width: 18px !important;
-      min-height: 18px !important;
-      max-width: 18px !important;
-      max-height: 18px !important;
-      fill: none !important;
-      stroke: currentColor !important;
-      stroke-width: 2.5 !important;
-      stroke-linecap: round !important;
-      stroke-linejoin: round !important;
-      display: block !important;
-    }
-  `;
-  document.head.appendChild(style);
+  // Attach to <html> instead of <body> to prevent layout flow disruptions
+  const host = document.createElement('div');
 
-  // Create Button Element with inline SVG icon
-  const button = document.createElement('button');
-  button.id = 'vm-scroll-top-btn';
-  button.setAttribute('aria-label', 'Scroll to top');
-  button.innerHTML = `<svg viewBox="0 0 24 24"><path d="M18 15l-6-6-6 6"/></svg>`;
-  document.body.appendChild(button);
+  // Strict fixed container
+  Object.assign(host.style, {
+    position: 'fixed',
+    bottom: '20px',
+    left: '20px',
+    width: '36px',
+    height: '36px',
+    zIndex: '2147483647',
+    pointerEvents: 'none',
+    margin: '0',
+    padding: '0',
+    border: 'none'
+  });
 
-  // Optimized Scroll Handling using requestAnimationFrame
+  const shadow = host.attachShadow({ mode: 'closed' });
+
+  // Native HTML5 Canvas renders crisp shapes immune to page CSS rules
+  const canvas = document.createElement('canvas');
+  canvas.width = 72;  // High-DPI scaling (2x)
+  canvas.height = 72;
+
+  Object.assign(canvas.style, {
+    width: '36px',
+    height: '36px',
+    cursor: 'pointer',
+    opacity: '0',
+    visibility: 'hidden',
+    transform: 'scale(0.8)',
+    transition: 'opacity 0.2s ease, transform 0.2s ease, visibility 0.2s',
+    pointerEvents: 'none',
+    display: 'block'
+  });
+
+  const ctx = canvas.getContext('2d');
+
+  function drawButton(isHovered = false) {
+    ctx.clearRect(0, 0, 72, 72);
+
+    // Background circle
+    ctx.beginPath();
+    ctx.arc(36, 36, 34, 0, Math.PI * 2);
+    ctx.fillStyle = isHovered ? 'rgba(0, 0, 0, 0.95)' : 'rgba(30, 30, 30, 0.85)';
+    ctx.fill();
+
+    // Arrow icon stroke
+    ctx.beginPath();
+    ctx.moveTo(22, 42);
+    ctx.lineTo(36, 28);
+    ctx.lineTo(50, 42);
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+
+  drawButton(false);
+  shadow.appendChild(canvas);
+
+  (document.documentElement || document.body).appendChild(host);
+
+  // Hover states via Canvas redraw
+  canvas.addEventListener('mouseenter', () => drawButton(true));
+  canvas.addEventListener('mouseleave', () => drawButton(false));
+
+  // Scroll visibility handling
   let ticking = false;
-
-  const toggleButtonVisibility = () => {
+  const toggleVisibility = () => {
     if (window.scrollY > 300) {
-      button.classList.add('visible');
+      canvas.style.opacity = '1';
+      canvas.style.visibility = 'visible';
+      canvas.style.transform = 'scale(1)';
+      canvas.style.pointerEvents = 'auto';
     } else {
-      button.classList.remove('visible');
+      canvas.style.opacity = '0';
+      canvas.style.visibility = 'hidden';
+      canvas.style.transform = 'scale(0.8)';
+      canvas.style.pointerEvents = 'none';
     }
     ticking = false;
   };
@@ -100,15 +102,15 @@
     'scroll',
     () => {
       if (!ticking) {
-        window.requestAnimationFrame(toggleButtonVisibility);
+        window.requestAnimationFrame(toggleVisibility);
         ticking = true;
       }
     },
     { passive: true }
   );
 
-  // Fast Smooth Scroll
-  button.addEventListener('click', () => {
+  // Click handler
+  canvas.addEventListener('click', () => {
     window.scrollTo({
       top: 0,
       behavior: 'smooth'
