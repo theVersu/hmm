@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.8
 // @description  Translates Chinese, Japanese, and Korean video titles and channel names to English when hovering.
-// @author       Your Name
+// @author       Gemini
 // @match        https://www.youtube.com/*
 // @grant        GM.xmlHttpRequest
 // @connect      translate.googleapis.com
