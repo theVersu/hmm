@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.0
+// @version      1.1
 // @description  Cross-redirect sidebar with automatic multi-candidate path testing to fix URL discrepancies (-wn, -v1, -novel, -kr-web-novel, -s-) across novel platforms.
 // @author       AI Collaborator
 // @match        *://*.webnovel.com/*
@@ -159,6 +159,29 @@
     function getRawSlug() {
         const host = window.location.hostname;
         const path = window.location.pathname;
+
+        if (host.includes('webnovel.com')) {
+            let titleText = '';
+            const h1El = document.querySelector('h1.pt4.fs16');
+            const imgAltEl = document.querySelector('.g_thumb img');
+            const breadcrumbEl = document.querySelector('.det-hd span');
+
+            if (h1El && h1El.textContent.trim()) {
+                titleText = h1El.textContent;
+            } else if (imgAltEl && imgAltEl.getAttribute('alt')) {
+                titleText = imgAltEl.getAttribute('alt');
+            } else if (breadcrumbEl && breadcrumbEl.textContent.trim()) {
+                titleText = breadcrumbEl.textContent;
+            }
+
+            if (titleText) {
+                return titleText
+                    .toLowerCase()
+                    .replace(/['']/g, '')
+                    .replace(/[^a-z0-9]+/g, '-')
+                    .replace(/^-+|-+$/g, '');
+            }
+        }
 
         if (path.includes('/book/') || path.includes('/novel/')) {
             const parts = path.split('/').filter(Boolean);
