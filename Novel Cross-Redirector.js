@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.4
+// @version      1.5
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live.
 // @author       Gemini, Claude
 // @match        *://*.webnovel.com/*
@@ -70,6 +70,9 @@
         { key: 'novelarrow', name: 'NovelArrow', host: 'novelarrow.com', home: 'https://novelarrow.com/' }
     ];
     const MIRROR_TTL_MS = 30 * 60 * 1000; // re-check which domain is live every 30 min
+
+    // Mobile layout: sidebar is hidden and slides in from the left when the small tab is tapped.
+    const MOBILE_TAB_TOP = '50%';   // vertical position of the pull tab (e.g. '35%' to move it up)
 
     /* ---- pure helpers start ---- */
 
@@ -361,6 +364,86 @@
             .ncs-btn:hover::after {
                 opacity: 1 !important;
                 transform: translateY(-50%) translateX(14px) !important;
+            }
+
+            /* ---------- Mobile: hidden slide-in panel + small pull tab ---------- */
+            #novel-cross-sidebar.ncs-mobile {
+                --ncs-panel-w: 62px;
+                top: ${MOBILE_TAB_TOP} !important;
+                left: 0 !important;
+                width: var(--ncs-panel-w) !important;
+                box-sizing: border-box !important;
+                padding: 10px 9px !important;
+                gap: 10px !important;
+                background: rgba(15, 23, 42, 0.94) !important;
+                border-radius: 0 14px 14px 0 !important;
+                box-shadow: 4px 0 18px rgba(0, 0, 0, 0.5) !important;
+                transform: translate(-100%, -50%) !important;
+                visibility: hidden !important;
+                pointer-events: none !important;
+                transition: transform 0.25s ease, visibility 0s linear 0.25s !important;
+            }
+
+            #novel-cross-sidebar.ncs-mobile.ncs-open {
+                transform: translate(0, -50%) !important;
+                visibility: visible !important;
+                pointer-events: auto !important;
+                transition: transform 0.25s ease, visibility 0s linear 0s !important;
+            }
+
+            .ncs-mobile .ncs-btn {
+                width: 44px !important;
+                height: 44px !important;
+            }
+
+            /* no hover on touch: kill sticky hover zoom + tooltips */
+            .ncs-mobile .ncs-btn:hover {
+                transform: none !important;
+                filter: none !important;
+            }
+            .ncs-mobile .ncs-btn::after,
+            .ncs-mobile .ncs-btn:hover::after {
+                display: none !important;
+            }
+
+            #ncs-toggle {
+                position: fixed !important;
+                top: ${MOBILE_TAB_TOP} !important;
+                left: 0 !important;
+                transform: translateY(-50%) !important;
+                width: 20px !important;
+                height: 56px !important;
+                z-index: 2147483647 !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                box-sizing: border-box !important;
+                background: rgba(15, 23, 42, 0.6) !important;
+                color: #ffffff !important;
+                border-radius: 0 10px 10px 0 !important;
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4) !important;
+                font: 700 20px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+                opacity: 0.6 !important;
+                cursor: pointer !important;
+                user-select: none !important;
+                -webkit-tap-highlight-color: transparent !important;
+                touch-action: manipulation !important;
+                transition: left 0.25s ease, opacity 0.2s ease, background 0.2s ease !important;
+            }
+
+            #ncs-toggle.ncs-open {
+                left: 62px !important;
+                opacity: 0.95 !important;
+                background: rgba(15, 23, 42, 0.94) !important;
+            }
+
+            #ncs-toggle span {
+                display: block !important;
+                transition: transform 0.25s ease !important;
+            }
+
+            #ncs-toggle.ncs-open span {
+                transform: rotate(180deg) !important;
             }
         `;
 
@@ -732,12 +815,80 @@
     }
 
     /* ------------------------------------------------------------------ *
+     *  Mobile mode (hidden panel + pull tab)
+     * ------------------------------------------------------------------ */
+
+    const touchMQ = window.matchMedia ? window.matchMedia('(hover: none) and (pointer: coarse)') : null;
+    let menuOpen = false;
+
+    function isMobile() {
+        return !!(touchMQ && touchMQ.matches) || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent || '');
+    }
+
+    function applyOpenState() {
+        const box = document.getElementById('novel-cross-sidebar');
+        const tab = document.getElementById('ncs-toggle');
+        if (box) box.classList.toggle('ncs-open', menuOpen);
+        if (tab) {
+            tab.classList.toggle('ncs-open', menuOpen);
+            tab.setAttribute('aria-expanded', String(menuOpen));
+        }
+    }
+
+    function setMenuOpen(open) {
+        menuOpen = open;
+        applyOpenState();
+    }
+
+    // Create / remove the pull tab depending on mode
+    function syncToggle(mobile) {
+        let tab = document.getElementById('ncs-toggle');
+
+        if (!mobile) {
+            if (tab) tab.remove();
+            menuOpen = false;
+            return;
+        }
+
+        if (!tab) {
+            tab = document.createElement('div');
+            tab.id = 'ncs-toggle';
+            tab.setAttribute('role', 'button');
+            tab.setAttribute('aria-label', 'Toggle novel site links');
+            const arrow = document.createElement('span');
+            arrow.textContent = '\u203A'; // ›
+            tab.appendChild(arrow);
+            tab.addEventListener('click', e => {
+                e.preventDefault();
+                e.stopPropagation();
+                setMenuOpen(!menuOpen);
+            });
+            (document.body || document.documentElement).appendChild(tab);
+        }
+
+        tab.classList.toggle('ncs-open', menuOpen);
+    }
+
+    // Tap anywhere outside the panel / tab closes it
+    document.addEventListener('pointerdown', e => {
+        if (!menuOpen) return;
+        const t = e.target;
+        if (t && t.closest && (t.closest('#novel-cross-sidebar') || t.closest('#ncs-toggle'))) return;
+        setMenuOpen(false);
+    }, true);
+
+    /* ------------------------------------------------------------------ *
      *  Sidebar build
      * ------------------------------------------------------------------ */
 
     function initSidebar() {
+        injectCSS();
+
+        const mobile = isMobile();
+        syncToggle(mobile);
+
         const info = getSourceInfo();
-        const sig = window.location.pathname + '|' + info.key;
+        const sig = window.location.pathname + '|' + info.key + '|' + (mobile ? 'm' : 'd');
 
         const existing = document.getElementById('novel-cross-sidebar');
         if (existing) {
@@ -747,7 +898,6 @@
             existing.remove();
         }
 
-        injectCSS();
         const gen = ++generation;
 
         const host = window.location.hostname;
@@ -765,6 +915,14 @@
         const container = document.createElement('div');
         container.id = 'novel-cross-sidebar';
         container.setAttribute('data-sig', sig);
+        if (mobile) {
+            container.classList.add('ncs-mobile');
+            if (menuOpen) container.classList.add('ncs-open');
+            // after picking a site (opens in a new tab) tuck the panel away again
+            container.addEventListener('click', e => {
+                if (e.target.closest && e.target.closest('a.ncs-btn')) setTimeout(() => setMenuOpen(false), 150);
+            });
+        }
 
         sites.forEach(site => {
             if (site.isCurrent) return;
