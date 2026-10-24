@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.3
+// @version      1.4
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live.
 // @author       Gemini, Claude
 // @match        *://*.webnovel.com/*
@@ -388,7 +388,9 @@
         let title = '';
         const isWebnovel = host.includes('webnovel.com');
 
-        if (isWebnovel) {
+        // Only read the title on an actual novel/chapter page (URL has /book/<slug>). On the homepage,
+        // lists, rankings etc. the page is full of OTHER novels' thumbnails and must not be mistaken for ours.
+        if (isWebnovel && slug) {
             const h1El = document.querySelector('h1.pt4.fs16');
             const imgAltEl = document.querySelector('.g_thumb img');
             const breadcrumbEl = document.querySelector('.det-hd span');
@@ -402,8 +404,8 @@
             }
 
             // Webnovel is partly client-rendered: if the DOM title doesn't agree with the URL
-            // it's stale (previous novel) - trust the URL instead.
-            if (title && slug) {
+            // it's stale (previous novel) or a recommendation thumbnail - trust the URL instead.
+            if (title) {
                 const a = compact(title);
                 const b = compact(stripSuffixes(slug));
                 if (a && b && !a.includes(b) && !b.includes(a)) title = '';
