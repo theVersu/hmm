@@ -3,7 +3,7 @@
 // @namespace    http://tampermonkey.net/
 // @version      1.6
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
-// @author       Claude
+// @author       AI Collaborator
 // @match        *://*.webnovel.com/*
 // @match        *://*.novelfire.net/*
 // @match        *://*.novelphoenix.com/*
