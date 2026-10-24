@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.5
-// @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live.
-// @author       Gemini, Claude
+// @version      1.6
+// @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
+// @author       Claude
 // @match        *://*.webnovel.com/*
 // @match        *://*.novelfire.net/*
 // @match        *://*.novelphoenix.com/*
@@ -73,6 +73,19 @@
 
     // Mobile layout: sidebar is hidden and slides in from the left when the small tab is tapped.
     const MOBILE_TAB_TOP = '50%';   // vertical position of the pull tab (e.g. '35%' to move it up)
+
+    // Chapter links can only be built for these targets. Webnovel (its chapter URLs use its own chapter IDs) and
+    // Mvlempyr (URL contains a Mvlempyr-specific novel ID) always get the novel page instead.
+    //   'number' = .../chapter-16                      (NovelFire + NovelPhoenix: same software/layout)
+    //   'title'  = .../chapter-16-into-the-breach      (NovelPing / NovelArrow)
+    const CHAPTER_STYLE = {
+        novelfire: 'number',
+        novelphoenix: 'number',
+        novelping: 'title',
+        novelarrow: 'title'
+    };
+
+    const DEBUG = false;            // true = log what the script read from the page to the browser console
 
     /* ---- pure helpers start ---- */
 
@@ -200,6 +213,58 @@
         if (found.includes(expected)) return true;
         // page title shorter than ours (e.g. we have a subtitle it lacks)
         return found.length >= 6 && found.length >= expected.length * 0.6 && expected.includes(found);
+    }
+
+    // "Chapter 16: Into The Breach" -> { n: 16, title: 'Into The Breach' }
+    // Repeated prefixes ("Chapter 1: Chapter 1: Foo") and a trailing reader-progress "| 3.89%" are removed.
+    function parseChapterText(text) {
+        const t = (text || '').replace(/\s+/g, ' ').trim();
+        const m = t.match(/^(?:chapter|chap\.?|ch\.?)\s*0*(\d+)\b\s*[:.\-\u2013\u2014]*\s*(.*)$/i);
+        if (!m) return null;
+        let title = m[2];
+        title = title.replace(/^(?:(?:chapter|chap\.?|ch\.?)\s*0*\d+\b\s*[:.\-\u2013\u2014]*\s*)+/i, '');
+        title = title.replace(/\s*[|\u2502\u00A6]?\s*\d+(?:\.\d+)?\s*%\s*$/, '').trim();
+        return { n: parseInt(m[1], 10), title };
+    }
+
+    // Webnovel reader top bar: "<Novel title> / Chapter 16: Into The Breach | 3.89%"
+    // -> { novel, n, title }   (n is null when the part after "/" isn't a numbered chapter)
+    function parseReaderHeader(text) {
+        const t = (text || '').replace(/\s+/g, ' ').trim();
+
+        let m = t.match(/^(.+?)\s*\/\s*((?:chapter|chap\.?|ch\.?)\s*\d.*)$/i);
+        if (m) {
+            const ch = parseChapterText(m[2]);
+            if (ch && m[1].trim().length >= 2) return { novel: m[1].trim(), n: ch.n, title: ch.title };
+        }
+
+        m = t.match(/^(.+?)\s+\/\s+(.+)$/);
+        if (m && m[1].trim().length >= 3) {
+            return { novel: m[1].trim(), n: null, title: m[2].replace(/\s*[|\u2502\u00A6]?\s*\d+(?:\.\d+)?\s*%\s*$/, '').trim() };
+        }
+        return null;
+    }
+
+    // Chapter URLs to try under an already-verified novel URL (see CHAPTER_STYLE).
+    //   number sites (NovelFire / NovelPhoenix): exactly one URL - the number is all they use.
+    //   title sites (NovelPing / NovelArrow): number + title slug variants, bare number as the last resort.
+    function getChapterCandidates(siteKey, novelUrl, ch) {
+        if (!ch || ch.n === null || ch.n === undefined) return [];
+        const base = novelUrl.replace(/\/+$/, '');
+        const num = `chapter-${ch.n}`;
+
+        if (CHAPTER_STYLE[siteKey] === 'number') return [`${base}/${num}`];
+
+        const titleSlugs = [];
+        if (ch.rawSlug) titleSlugs.push(ch.rawSlug.toLowerCase());
+        if (ch.title) {
+            titleSlugs.push(slugify(ch.title, 'drop', 'drop'));
+            titleSlugs.push(slugify(ch.title, 'hyphen', 'drop'));
+            if (/&/.test(ch.title)) titleSlugs.push(slugify(ch.title, 'drop', 'and'));
+        }
+        const withTitle = Array.from(new Set(titleSlugs.filter(Boolean))).map(t => `${num}-${t}`);
+
+        return Array.from(new Set(withTitle.concat([num]).map(s => `${base}/${s}`))).slice(0, 8);
     }
 
     /* ---- pure helpers end ---- */
@@ -454,46 +519,196 @@
     }
 
     /* ------------------------------------------------------------------ *
-     *  Reading the novel from the current page
+     *  Reading the novel / chapter from the current page
      * ------------------------------------------------------------------ */
+
+    function dbg() {
+        if (DEBUG) console.log.apply(console, ['[NCS]'].concat(Array.from(arguments)));
+    }
+
+    // Webnovel's reader shows "<Novel title> / Chapter N: <name>" in a top bar that updates while you scroll.
+    function readWebnovelHeader() {
+        if (!document.body) return null;
+        const all = document.body.querySelectorAll('*');
+        const limit = Math.min(all.length, 700); // the bar sits near the top of the DOM
+        let strict = null;
+        let loose = null;
+
+        for (let i = 0; i < limit; i++) {
+            const el = all[i];
+            if (el.childElementCount > 8) continue;
+            const txt = el.textContent;
+            if (!txt || txt.length < 8 || txt.length > 500 || txt.indexOf('/') === -1) continue;
+
+            const parsed = parseReaderHeader(txt);
+            if (!parsed) continue;
+
+            const rect = el.getBoundingClientRect();
+            if (rect.height === 0 || rect.height > 140 || rect.top > 220) continue;
+
+            // smallest element that contains both parts = the bar's own wrapper
+            if (parsed.n !== null) {
+                if (!strict || txt.length < strict.len) strict = { len: txt.length, parsed };
+            } else if (!loose || txt.length < loose.len) {
+                loose = { len: txt.length, parsed };
+            }
+        }
+
+        const best = strict || loose;
+        return best ? best.parsed : null;
+    }
+
+    const CHAPTER_SELECTOR = [
+        'h1', 'h2', 'h3', 'h4',
+        '[class*="chapter-title" i]', '[class*="chapter_title" i]', '[class*="chapter-name" i]',
+        '[class*="chr-" i]',
+        '[class*="breadcrumb" i] li', '[class*="breadcrumb" i] a', '[class*="breadcrumb" i] span'
+    ].join(',');
+
+    // Looks for "Chapter N: Name" in the page's headings / breadcrumbs / <title>.
+    // wantN = a specific chapter number to match, or null for "whatever chapter this page is".
+    function findChapterOnPage(wantN) {
+        let fallback = null;
+
+        const consider = text => {
+            const p = parseChapterText(text);
+            if (!p) return null;
+            if (wantN !== null && p.n !== wantN) return null;
+            return p;
+        };
+
+        const els = document.querySelectorAll(CHAPTER_SELECTOR);
+        for (let i = 0; i < Math.min(els.length, 120); i++) {
+            const t = els[i].textContent;
+            if (!t || t.length > 200) continue;
+            const p = consider(t);
+            if (!p) continue;
+            if (p.title) return p;
+            if (!fallback) fallback = p;
+        }
+
+        const ogEl = document.querySelector('meta[property="og:title"]');
+        const sources = [ogEl ? ogEl.getAttribute('content') : '', document.title];
+        for (const src of sources) {
+            if (!src) continue;
+            for (const seg of src.split(/\s+[|\-\u2013\u2014]\s+/)) {
+                const p = consider(seg);
+                if (!p) continue;
+                if (p.title) return p;
+                if (!fallback) fallback = p;
+            }
+        }
+
+        return fallback;
+    }
+
+    // Chapter pages of some sites (e.g. Mvlempyr) have no novel slug in their URL - but they link back to the novel.
+    function slugFromNovelLink() {
+        const anchors = document.querySelectorAll('a[href*="/novel/"], a[href*="/book/"]');
+        for (let i = 0; i < Math.min(anchors.length, 100); i++) {
+            try {
+                const u = new URL(anchors[i].href, window.location.href);
+                if (bareHost(u.hostname) !== bareHost(window.location.hostname)) continue;
+                const m = u.pathname.match(/^\/(?:novel|book)\/([^/]+)\/?$/);
+                if (m) return { slug: m[1], text: (anchors[i].textContent || '').trim() };
+            } catch (e) {}
+        }
+        return null;
+    }
+
+    function novelTitleFromDocumentTitle() {
+        const segs = (document.title || '').split(/\s+[|\-\u2013\u2014]\s+/).map(s => s.trim()).filter(Boolean);
+        for (const seg of segs) {
+            if (parseChapterText(seg)) continue;
+            if (/webnovel|novelfire|novelphoenix|mvlempyr|novelping|novelarrow/i.test(seg)) continue;
+            if (seg.length >= 3) return seg;
+        }
+        return '';
+    }
 
     function getSourceInfo() {
         const host = window.location.hostname;
-        const parts = window.location.pathname.split('/').filter(Boolean);
-
-        let slug = '';
-        const idx = parts.findIndex(p => p === 'book' || p === 'novel');
-        if (idx !== -1 && parts[idx + 1]) {
-            slug = parts[idx + 1];
-            if (host.includes('webnovel.com')) slug = slug.replace(/_\d+$/, '');
-        }
-
-        let title = '';
+        const path = window.location.pathname;
+        const parts = path.split('/').filter(Boolean);
         const isWebnovel = host.includes('webnovel.com');
 
-        // Only read the title on an actual novel/chapter page (URL has /book/<slug>). On the homepage,
-        // lists, rankings etc. the page is full of OTHER novels' thumbnails and must not be mistaken for ours.
-        if (isWebnovel && slug) {
-            const h1El = document.querySelector('h1.pt4.fs16');
-            const imgAltEl = document.querySelector('.g_thumb img');
-            const breadcrumbEl = document.querySelector('.det-hd span');
+        let slug = '';
+        let chapterSeg = '';
+        const idx = parts.findIndex(p => p === 'book' || p === 'novel');
+        const onNovelPath = idx !== -1 && !!parts[idx + 1];
+        if (onNovelPath) {
+            slug = parts[idx + 1];
+            chapterSeg = parts[idx + 2] || '';
+            if (isWebnovel) slug = slug.replace(/_\d+$/, '');
+        }
+        // Webnovel's id-only URLs (/book/34771191700870405) carry no title at all
+        if (/^\d{8,}$/.test(slug)) slug = '';
 
-            if (h1El && h1El.textContent.trim()) {
-                title = h1El.textContent.trim();
-            } else if (imgAltEl && imgAltEl.getAttribute('alt')) {
-                title = imgAltEl.getAttribute('alt').trim();
-            } else if (breadcrumbEl && breadcrumbEl.textContent.trim()) {
-                title = breadcrumbEl.textContent.trim();
+        let title = '';
+        let chapter = null;
+
+        if (isWebnovel) {
+            if (onNovelPath && chapterSeg) {
+                // Reader page: novel + chapter come from the top bar (URL may be id-only)
+                const hdr = readWebnovelHeader();
+                if (hdr) {
+                    title = hdr.novel;
+                    if (hdr.n !== null) chapter = { n: hdr.n, title: hdr.title, rawSlug: '' };
+                }
+                if (!chapter) {
+                    const f = findChapterOnPage(null);
+                    if (f) chapter = { n: f.n, title: f.title, rawSlug: '' };
+                }
+                if (!title) title = novelTitleFromDocumentTitle();
+
+                const seg = chapterSeg.replace(/_\d+$/, '');
+                if (chapter && seg && !/^\d+$/.test(seg)) chapter.rawSlug = seg; // pristine chapter slug from the URL
+            } else if (onNovelPath) {
+                // Novel page: title from the page itself
+                const h1El = document.querySelector('h1.pt4.fs16');
+                const imgAltEl = document.querySelector('.g_thumb img');
+                const breadcrumbEl = document.querySelector('.det-hd span');
+
+                if (h1El && h1El.textContent.trim()) {
+                    title = h1El.textContent.trim();
+                } else if (imgAltEl && imgAltEl.getAttribute('alt')) {
+                    title = imgAltEl.getAttribute('alt').trim();
+                } else if (breadcrumbEl && breadcrumbEl.textContent.trim()) {
+                    title = breadcrumbEl.textContent.trim();
+                } else if (!slug) {
+                    title = novelTitleFromDocumentTitle();
+                }
+            }
+            // anywhere else on Webnovel (home, lists, rankings...): not a novel page -> no title
+        } else {
+            if (chapterSeg) {
+                const m = chapterSeg.match(/^chapter[-_]?0*(\d+)(?:[-_](.+))?$/i);
+                if (m) chapter = { n: parseInt(m[1], 10), title: '', rawSlug: (m[2] || '').toLowerCase() };
             }
 
-            // Webnovel is partly client-rendered: if the DOM title doesn't agree with the URL
-            // it's stale (previous novel) or a recommendation thumbnail - trust the URL instead.
-            if (title) {
-                const a = compact(title);
-                const b = compact(stripSuffixes(slug));
-                if (a && b && !a.includes(b) && !b.includes(a)) title = '';
+            if (chapterSeg || /chapter/i.test(path)) {
+                const found = findChapterOnPage(chapter ? chapter.n : null);
+                if (found) {
+                    if (chapter) chapter.title = found.title;
+                    else chapter = { n: found.n, title: found.title, rawSlug: '' };
+                }
+                if (!slug) {
+                    const link = slugFromNovelLink();
+                    if (link) {
+                        slug = link.slug;
+                        title = link.text;
+                    }
+                }
             }
         }
+
+        // The title on screen must agree with the URL's novel, otherwise it is stale / belongs to something else
+        if (title && slug) {
+            const a = compact(title);
+            const b = compact(stripSuffixes(slug));
+            if (a && b && !a.includes(b) && !b.includes(a)) title = '';
+        }
+        if (title.length > 200) title = '';
 
         const key = compact(title || stripSuffixes(slug));
 
@@ -502,7 +717,8 @@
             slug,
             // exact slug is only reusable when it came from a non-Webnovel site
             rawSlug: isWebnovel ? '' : slug,
-            key
+            key,
+            chapter
         };
     }
 
@@ -572,13 +788,66 @@
         return fail; // page has a title and it's a different novel
     }
 
+    // Verifies a CHAPTER url under an already-verified novel url.
+    //   ok   = loaded, stayed under the novel, and the page/URL says it is chapter n
+    //   weak = loaded fine but exposes nothing to confirm the chapter number
+    function judgeChapter(response, requestedUrl, novelUrl, n) {
+        const fail = { state: 'fail', url: requestedUrl };
+        if (!response || response.status !== 200) return fail;
+
+        let finalU, reqU, novelU;
+        try {
+            finalU = new URL(response.finalUrl || requestedUrl);
+            reqU = new URL(requestedUrl);
+            novelU = new URL(novelUrl);
+        } catch (e) {
+            return fail;
+        }
+
+        const fh = bareHost(finalU.hostname);
+        const rh = bareHost(reqU.hostname);
+        const bothMirrors = MIRRORS.some(m => m.host === fh) && MIRRORS.some(m => m.host === rh);
+        if (fh !== rh && !bothMirrors) return fail;
+
+        // Must be a page UNDER the novel: a redirect back to the novel page / a listing means "no such chapter"
+        const novelPath = novelU.pathname.replace(/\/+$/, '');
+        const finalPath = finalU.pathname.replace(/\/+$/, '');
+        const under = finalPath.startsWith(novelPath + '/') ||
+            (fh !== rh && /^\/(book|novel)\/[^/]+\/[^/]+/.test(finalPath));
+        if (!under) return fail;
+
+        let doc;
+        try {
+            doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
+        } catch (e) {
+            return fail;
+        }
+
+        const ogEl = doc.querySelector('meta[property="og:title"]');
+        const og = ogEl ? (ogEl.getAttribute('content') || '').trim() : '';
+        const docTitle = (doc.title || '').trim();
+        if (/page not found|\b404\b/i.test(og + ' ' + docTitle)) return fail;
+
+        const numRe = new RegExp('chapter[\\s_-]*0*' + n + '(?!\\d)', 'i');
+        const texts = [og, docTitle]
+            .concat(Array.from(doc.querySelectorAll('h1, h2')).slice(0, 8).map(h => h.textContent.trim()))
+            .filter(Boolean);
+
+        const url = finalU.origin + finalU.pathname;
+
+        if (numRe.test(finalPath) || texts.some(t => numRe.test(t))) return { state: 'ok', url };
+        if (texts.length === 0) return { state: 'weak', url };
+        return fail;
+    }
+
     /* ------------------------------------------------------------------ *
      *  Sidebar state
      * ------------------------------------------------------------------ */
 
-    let generation = 0; // bumped on every rebuild so late async results are ignored
+    let generation = 0;        // bumped on every rebuild so late async results are ignored
+    let latestChapter = null;  // chapter currently shown on the page (re-read every tick)
 
-    function setState(btn, site, state, url) {
+    function setState(btn, site, state, url, note) {
         if (url) btn.href = url;
         btn.classList.toggle('ncs-checking', state === 'checking');
         btn.classList.toggle('ncs-unverified', state === 'unverified');
@@ -586,35 +855,16 @@
         let label = site.name;
         if (state === 'checking') label += ' \u00B7 checking\u2026';
         else if (state === 'unverified') label += ' \u00B7 unverified (may not exist)';
+        else if (note) label += ' \u00B7 ' + note;
         btn.setAttribute('data-tooltip', label);
     }
 
-    // Probe every candidate (a few at a time) and link to the HIGHEST-PRIORITY one that verifies.
-    function resolveLink(site, info, btn, gen, onFail) {
-        const candidates = getCandidateUrls(site.key, info);
-        if (candidates.length === 0) {
-            setState(btn, site, 'unverified', site.defaultUrl);
-            return;
-        }
-
-        // Webnovel target is a search page - nothing to verify
-        if (site.key === 'webnovel') {
-            setState(btn, site, 'ok', candidates[0]);
-            return;
-        }
-
-        const cacheKey = site.key + ':' + info.key;
-        const cached = cacheGet(cacheKey);
-        if (cached) {
-            setState(btn, site, 'ok', cached);
-            return;
-        }
-
-        // Until something verifies, point at the best guess
-        setState(btn, site, 'checking', candidates[0]);
-
-        if (typeof GM_xmlhttpRequest !== 'function') {
-            setState(btn, site, 'unverified', candidates[0]);
+    // Probes candidate URLs (a few at a time) and reports the HIGHEST-PRIORITY one that verifies.
+    //   judge(response, url) -> { state: 'ok' | 'weak' | 'fail', url }
+    //   done(result | null)  -> null when nothing verified
+    function probeCandidates(candidates, judge, gen, done) {
+        if (!candidates.length || typeof GM_xmlhttpRequest !== 'function') {
+            done(null);
             return;
         }
 
@@ -623,19 +873,11 @@
         let active = 0;
         let finished = false;
 
-        function finish(state, url) {
+        function finish(r) {
             if (finished) return;
             finished = true;
             if (gen !== generation) return;
-            if (state === 'ok') {
-                cacheSet(cacheKey, url);
-                setState(btn, site, 'ok', url);
-            } else if (state === 'weak') {
-                setState(btn, site, 'ok', url);
-            } else {
-                setState(btn, site, 'unverified', candidates[0]);
-                if (onFail) onFail();
-            }
+            done(r);
         }
 
         function settle() {
@@ -643,28 +885,23 @@
             if (gen !== generation) { finished = true; return; }
 
             let weak = null;
-            let pending = false;
-
             for (let i = 0; i < results.length; i++) {
                 const r = results[i];
-                if (!r) { pending = true; break; }      // can't decide past an unfinished higher-priority candidate
-                if (r.state === 'ok') return finish('ok', r.url);
+                if (!r) return;                         // can't decide past an unfinished higher-priority candidate
+                if (r.state === 'ok') return finish(r);
                 if (r.state === 'weak' && !weak) weak = r;
             }
-
-            if (pending) return;
-            if (weak) return finish('weak', weak.url);
-            finish('fail');
+            finish(weak);
         }
 
         function launch(i) {
             active++;
             const target = candidates[i];
-            let done = false;
+            let settled = false;
 
             const complete = result => {
-                if (done) return;
-                done = true;
+                if (settled) return;
+                settled = true;
                 active--;
                 results[i] = result;
                 settle();
@@ -676,7 +913,7 @@
                     method: 'GET',
                     url: target,
                     timeout: PROBE_TIMEOUT_MS,
-                    onload: response => complete(judgeResponse(response, target, site.key, info.key)),
+                    onload: response => complete(judge(response, target)),
                     onerror: () => complete({ state: 'fail', url: target }),
                     ontimeout: () => complete({ state: 'fail', url: target }),
                     onabort: () => complete({ state: 'fail', url: target })
@@ -693,6 +930,98 @@
         }
 
         pump();
+    }
+
+    // Step 2 for a button: once the novel page is known, point at the CURRENT chapter on that site.
+    // Called again whenever the chapter on screen changes (Webnovel updates it while you scroll).
+    function applyChapter(btn) {
+        const st = btn._ncs;
+        if (!st || !st.ok || st.gen !== generation) return;
+
+        const token = ++st.token;
+        const ch = latestChapter;
+
+        // Default / fallback: the novel page itself
+        setState(btn, st.site, 'ok', st.novelUrl);
+
+        if (!CHAPTER_STYLE[st.site.key] || !ch || ch.n === null || ch.n === undefined) return;
+
+        const cacheKey = 'ch:' + st.novelUrl + ':' + ch.n;
+        const cached = cacheGet(cacheKey);
+        if (cached) {
+            setState(btn, st.site, 'ok', cached, 'Chapter ' + ch.n);
+            return;
+        }
+
+        const candidates = getChapterCandidates(st.site.key, st.novelUrl, ch);
+        probeCandidates(
+            candidates,
+            (response, url) => judgeChapter(response, url, st.novelUrl, ch.n),
+            st.gen,
+            r => {
+                if (token !== st.token) return; // a newer chapter was requested meanwhile
+                if (r) {
+                    if (r.state === 'ok') cacheSet(cacheKey, r.url);
+                    setState(btn, st.site, 'ok', r.url, 'Chapter ' + ch.n);
+                } else {
+                    setState(btn, st.site, 'ok', st.novelUrl, 'novel page (chapter link not found)');
+                }
+            }
+        );
+    }
+
+    function refreshChapters(container) {
+        Array.from(container.children).forEach(btn => {
+            if (btn._ncs) applyChapter(btn);
+        });
+    }
+
+    // Step 1 for a button: find + verify the novel page on the target site, then hand over to applyChapter.
+    function resolveLink(site, info, btn, gen, onFail) {
+        const st = btn._ncs = { site, gen, ok: false, novelUrl: '', token: 0 };
+
+        const candidates = getCandidateUrls(site.key, info);
+        if (candidates.length === 0) {
+            setState(btn, site, 'unverified', site.defaultUrl);
+            return;
+        }
+
+        // Webnovel target is a search page - nothing to verify, and no chapter links
+        if (site.key === 'webnovel') {
+            st.ok = true;
+            st.novelUrl = candidates[0];
+            setState(btn, site, 'ok', candidates[0], 'search');
+            return;
+        }
+
+        const cacheKey = site.key + ':' + info.key;
+        const cached = cacheGet(cacheKey);
+        if (cached) {
+            st.ok = true;
+            st.novelUrl = cached;
+            applyChapter(btn);
+            return;
+        }
+
+        // Until something verifies, point at the best guess
+        setState(btn, site, 'checking', candidates[0]);
+
+        probeCandidates(
+            candidates,
+            (response, url) => judgeResponse(response, url, site.key, info.key),
+            gen,
+            r => {
+                if (!r) {
+                    setState(btn, site, 'unverified', candidates[0]);
+                    if (onFail) onFail();
+                    return;
+                }
+                if (r.state === 'ok') cacheSet(cacheKey, r.url);
+                st.ok = true;
+                st.novelUrl = r.url;
+                applyChapter(btn);
+            }
+        );
     }
 
     /* ------------------------------------------------------------------ *
@@ -888,15 +1217,27 @@
         syncToggle(mobile);
 
         const info = getSourceInfo();
-        const sig = window.location.pathname + '|' + info.key + '|' + (mobile ? 'm' : 'd');
+        latestChapter = info.chapter;
+
+        // Rebuild only when the NOVEL changes (or the title became known / layout mode changed).
+        const sig = info.key + '|' + (info.title ? 't' : 's') + '|' + (mobile ? 'm' : 'd');
+        // Chapter changes (e.g. scrolling in Webnovel's reader) only re-point the chapter links.
+        const chapSig = info.chapter ? [info.chapter.n, info.chapter.title, info.chapter.rawSlug].join('|') : '';
 
         const existing = document.getElementById('novel-cross-sidebar');
         if (existing) {
-            // Same page + same novel: nothing to do. Otherwise (SPA navigation to another novel,
-            // or the title only appeared after load) rebuild so links never go stale.
-            if (existing.getAttribute('data-sig') === sig) return;
+            if (existing.getAttribute('data-sig') === sig) {
+                if (existing.getAttribute('data-chap') !== chapSig) {
+                    existing.setAttribute('data-chap', chapSig);
+                    dbg('chapter ->', info.chapter);
+                    refreshChapters(existing);
+                }
+                return;
+            }
             existing.remove();
         }
+
+        dbg('novel ->', { key: info.key, title: info.title, slug: info.slug, chapter: info.chapter });
 
         const gen = ++generation;
 
@@ -915,6 +1256,7 @@
         const container = document.createElement('div');
         container.id = 'novel-cross-sidebar';
         container.setAttribute('data-sig', sig);
+        container.setAttribute('data-chap', chapSig);
         if (mobile) {
             container.classList.add('ncs-mobile');
             if (menuOpen) container.classList.add('ncs-open');
