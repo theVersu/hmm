@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.6
+// @version      1.7
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
 // @author       AI Collaborator
 // @match        *://*.webnovel.com/*
@@ -13,6 +13,9 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_listValues
+// @grant        GM_deleteValue
+// @grant        GM_registerMenuCommand
 // @connect      webnovel.com
 // @connect      novelfire.net
 // @connect      novelphoenix.com
@@ -35,9 +38,9 @@
 
     const CACHE_PREFIX = 'ncs2:';
     const CACHE_TTL_MS = 14 * 24 * 60 * 60 * 1000; // verified links are remembered for 14 days
-    const PROBE_TIMEOUT_MS = 8000;
+    const PROBE_TIMEOUT_MS = 12000;
     const PROBE_CONCURRENCY = 3;                   // parallel probes per site
-    const MAX_CANDIDATES = 30;
+    const MAX_CANDIDATES = 42;
 
     // Suffixes sites append to disambiguate novels. Tried in this order after the bare slug.
     const SUFFIXES = ['', '-wn', '-novel', '-v1', '-v2', '-kr-web-novel', '-web-novel'];
@@ -131,15 +134,84 @@
             .replace(/[^\p{L}\p{N}]+/gu, '');
     }
 
-    function slugify(text, apos, amp) {
+    // apos  : "drop" -> heros          | "hyphen" -> hero-s
+    // amp   : "drop" -> (nothing)      | "and"    -> and
+    // num   : "join" -> 10,000x=10000x | "hyphen" -> 10-000x          (commas inside numbers)
+    // punct : "hyphen" -> re-zero      | "drop"   -> rezero           (any other punctuation)
+    // Sites differ on every one of these, so callers generate the combinations and the right one is verified.
+    function slugify(text, apos, amp, num, punct) {
         let s = (text || '')
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '')
             .toLowerCase();
         s = s.replace(/&/g, amp === 'and' ? ' and ' : ' ');
-        // apostrophe handling differs per site: "heros" (dropped) vs "hero-s" (hyphenated)
         s = s.replace(/['\u2018\u2019`\u00B4]/g, apos === 'hyphen' ? '-' : '');
+        if (num === 'join') s = s.replace(/(\d),(?=\d)/g, '$1');
+        if (punct === 'drop') s = s.replace(/[^a-z0-9\s-]+/g, '');
         return s.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+    }
+
+    // Every plausible slug for a title, most common conventions first, de-duplicated
+    // (a title without apostrophes / number commas / odd punctuation collapses to just 1-2 slugs).
+    function titleSlugVariants(text) {
+        if (!text) return [];
+        const amps = /&/.test(text) ? ['drop', 'and'] : ['drop'];
+        const combos = [            // [apostrophe, comma-in-number, other punctuation]
+            ['drop', 'join', 'hyphen'],
+            ['drop', 'hyphen', 'hyphen'],
+            ['hyphen', 'join', 'hyphen'],
+            ['hyphen', 'hyphen', 'hyphen'],
+            ['drop', 'join', 'drop'],
+            ['hyphen', 'join', 'drop']
+        ];
+        const out = [];
+        for (const amp of amps) {
+            for (const c of combos) out.push(slugify(text, c[0], amp, c[1], c[2]));
+        }
+        return Array.from(new Set(out.filter(Boolean)));
+    }
+
+    // Slug -> its other number spellings:  ...-10-000x-... <-> ...-10000x-...
+    function slugNumberVariants(slug) {
+        const out = [];
+
+        let joined = slug;
+        for (let i = 0; i < 4; i++) {
+            const next = joined.replace(/(\d)-(\d{3})(?=-|[a-z]|$)/g, '$1$2');
+            if (next === joined) break;
+            joined = next;
+        }
+        if (joined !== slug) out.push(joined);
+
+        const split = slug.replace(/(?<!\d)(\d{4,9})(?!\d)/g, m => m.replace(/\B(?=(\d{3})+(?!\d))/g, '-'));
+        if (split !== slug) out.push(split);
+
+        return out;
+    }
+
+    const STOP_WORDS = new Set(['the', 'a', 'an', 'and', 'of', 'in', 'on', 'to', 'is', 'for', 'my', 'i', 'with', 'at', 'by']);
+
+    function tokens(s) {
+        return (s || '')
+            .toLowerCase()
+            .normalize('NFD')
+            .replace(/[\u0300-\u036f]/g, '')
+            .replace(/(\d)[,](?=\d)/g, '$1')
+            .replace(/(\d)-(?=\d{3}(?!\d))/g, '$1')
+            .replace(/['\u2018\u2019`]/g, '')
+            .split(/[^\p{L}\p{N}]+/u)
+            .filter(Boolean);
+    }
+
+    // Fallback when the exact title differs slightly ("Heroes & Villains" vs "Heroes and Villains"):
+    // most of the meaningful words must be present.
+    function tokensMatch(expected, foundText) {
+        const exp = (expected || []).filter(t => !STOP_WORDS.has(t));
+        if (exp.length < 3) return false;
+        const found = new Set(tokens(foundText));
+        let hit = 0;
+        for (const t of exp) if (found.has(t)) hit++;
+        return hit / exp.length >= 0.85;
     }
 
     function stripSuffixes(slug) {
@@ -164,21 +236,17 @@
 
         if (info.title) {
             // Title-derived (Webnovel has no slug we can reuse, so build every plausible form).
-            const apoModes = ['drop', 'hyphen'];
-            const ampModes = /&/.test(info.title) ? ['drop', 'and'] : ['drop'];
-            for (const apos of apoModes) {
-                for (const amp of ampModes) {
-                    bases.push(slugify(info.title, apos, amp));
-                }
-            }
+            bases.push.apply(bases, titleSlugVariants(info.title));
         }
 
         if (info.slug) {
             const core = stripSuffixes(info.slug);
-            bases.push(core);
             // "hero-s-sword" -> "heros-sword"
             const merged = core.replace(/([a-z0-9])-s(?=-|$)/g, '$1s');
-            if (merged !== core) bases.push(merged);
+            [core, merged].forEach(c => {
+                bases.push(c);
+                bases.push.apply(bases, slugNumberVariants(c));
+            });
         }
 
         return Array.from(new Set(bases.filter(Boolean)));
@@ -198,9 +266,11 @@
         // Exact slug from a non-Webnovel source goes first (the other site may use the same one).
         if (info.rawSlug) list.push(prefix + info.rawSlug);
 
+        // Suffix-major: every spelling is tried with the most common (empty) suffix before moving on,
+        // so a long list of spellings can never push the right one past the cap.
         const bases = getBaseSlugs(info);
-        for (const base of bases) {
-            for (const suf of SUFFIXES) {
+        for (const suf of SUFFIXES) {
+            for (const base of bases) {
                 list.push(prefix + base + suf);
             }
         }
@@ -257,11 +327,7 @@
 
         const titleSlugs = [];
         if (ch.rawSlug) titleSlugs.push(ch.rawSlug.toLowerCase());
-        if (ch.title) {
-            titleSlugs.push(slugify(ch.title, 'drop', 'drop'));
-            titleSlugs.push(slugify(ch.title, 'hyphen', 'drop'));
-            if (/&/.test(ch.title)) titleSlugs.push(slugify(ch.title, 'drop', 'and'));
-        }
+        if (ch.title) titleSlugs.push.apply(titleSlugs, titleSlugVariants(ch.title));
         const withTitle = Array.from(new Set(titleSlugs.filter(Boolean))).map(t => `${num}-${t}`);
 
         return Array.from(new Set(withTitle.concat([num]).map(s => `${base}/${s}`))).slice(0, 8);
@@ -292,6 +358,16 @@
                 GM_setValue(CACHE_PREFIX + key, JSON.stringify({ url, t: Date.now() }));
             }
         } catch (e) {}
+    }
+
+    // Violentmonkey menu entry: forget every verified link (useful when testing or after a site changes)
+    if (typeof GM_registerMenuCommand === 'function' && typeof GM_listValues === 'function' && typeof GM_deleteValue === 'function') {
+        GM_registerMenuCommand('Novel Cross-Redirector: clear saved links', () => {
+            try {
+                GM_listValues().filter(k => k.indexOf(CACHE_PREFIX) === 0).forEach(k => GM_deleteValue(k));
+                alert('Saved links cleared. Reload the page.');
+            } catch (e) {}
+        });
     }
 
     /* ------------------------------------------------------------------ *
@@ -715,6 +791,7 @@
         return {
             title,
             slug,
+            tokens: tokens(title || stripSuffixes(slug).replace(/-/g, ' ')),
             // exact slug is only reusable when it came from a non-Webnovel site
             rawSlug: isWebnovel ? '' : slug,
             key,
@@ -730,33 +807,35 @@
     //   ok   = page loaded, stayed on a novel page, and its title/heading matches our novel
     //   weak = page loaded fine but exposes no title info to compare (client-rendered shell)
     //   fail = 404, redirected away (home/search/listing), or it is a different novel
-    function judgeResponse(response, requestedUrl, siteKey, expectedKey) {
-        const fail = { state: 'fail', url: requestedUrl };
+    function judgeResponse(response, requestedUrl, siteKey, info) {
+        const expectedKey = info.key;
+        const bad = why => ({ state: 'fail', url: requestedUrl, why });
 
-        if (!response || response.status !== 200) return fail;
+        if (!response) return bad('no response');
+        if (response.status !== 200) return bad('HTTP ' + response.status);
 
         let finalU, reqU;
         try {
             finalU = new URL(response.finalUrl || requestedUrl);
             reqU = new URL(requestedUrl);
         } catch (e) {
-            return fail;
+            return bad('bad url');
         }
 
         // Same host - or a redirect between the mirror domains (stale detection still ends up right)
         const fh = bareHost(finalU.hostname);
         const rh = bareHost(reqU.hostname);
         const bothMirrors = MIRRORS.some(m => m.host === fh) && MIRRORS.some(m => m.host === rh);
-        if (fh !== rh && !bothMirrors) return fail;
+        if (fh !== rh && !bothMirrors) return bad('redirected to another site: ' + fh);
 
         // Must still be a novel page: /book/<something> or /novel/<something>
-        if (!/^\/(book|novel)\/[^/]+/.test(finalU.pathname)) return fail;
+        if (!/^\/(book|novel)\/[^/]+/.test(finalU.pathname)) return bad('redirected away from a novel page: ' + finalU.pathname);
 
         let doc;
         try {
             doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
         } catch (e) {
-            return fail;
+            return bad('unreadable page');
         }
 
         const meta = sel => {
@@ -773,27 +852,28 @@
         const docTitle = (doc.title || '').trim();
         const allTexts = docTitle ? headings.concat(docTitle) : headings;
 
-        // Soft-404 detection (page returns 200 but says it doesn't exist)
-        if (allTexts.some(t => /\b(404|page not found|not found)\b/i.test(t))) return fail;
-
         const url = finalU.origin + finalU.pathname;
 
-        if (allTexts.some(t => titleMatches(expectedKey, compact(t)))) {
-            return { state: 'ok', url };
-        }
+        // A title match always wins (so a novel actually named "...404..." or "...Not Found" is fine)
+        if (allTexts.some(t => titleMatches(expectedKey, compact(t)))) return { state: 'ok', url, why: 'title match' };
+        if (allTexts.some(t => tokensMatch(info.tokens, t))) return { state: 'ok', url, why: 'title match (loose)' };
+
+        // Soft-404 (page returns 200 but says it doesn't exist)
+        if (allTexts.some(t => /\b(404|page not found|not found)\b/i.test(t))) return bad('page says "not found"');
 
         // Nothing to compare against -> can't prove it, but it isn't clearly wrong either
-        if (headings.length === 0) return { state: 'weak', url };
+        if (headings.length === 0) return { state: 'weak', url, why: 'no title on page to compare' };
 
-        return fail; // page has a title and it's a different novel
+        return bad('different title: ' + allTexts.slice(0, 3).join(' | '));
     }
 
     // Verifies a CHAPTER url under an already-verified novel url.
     //   ok   = loaded, stayed under the novel, and the page/URL says it is chapter n
     //   weak = loaded fine but exposes nothing to confirm the chapter number
     function judgeChapter(response, requestedUrl, novelUrl, n) {
-        const fail = { state: 'fail', url: requestedUrl };
-        if (!response || response.status !== 200) return fail;
+        const bad = why => ({ state: 'fail', url: requestedUrl, why });
+        if (!response) return bad('no response');
+        if (response.status !== 200) return bad('HTTP ' + response.status);
 
         let finalU, reqU, novelU;
         try {
@@ -801,32 +881,31 @@
             reqU = new URL(requestedUrl);
             novelU = new URL(novelUrl);
         } catch (e) {
-            return fail;
+            return bad('bad url');
         }
 
         const fh = bareHost(finalU.hostname);
         const rh = bareHost(reqU.hostname);
         const bothMirrors = MIRRORS.some(m => m.host === fh) && MIRRORS.some(m => m.host === rh);
-        if (fh !== rh && !bothMirrors) return fail;
+        if (fh !== rh && !bothMirrors) return bad('redirected to another site: ' + fh);
 
         // Must be a page UNDER the novel: a redirect back to the novel page / a listing means "no such chapter"
         const novelPath = novelU.pathname.replace(/\/+$/, '');
         const finalPath = finalU.pathname.replace(/\/+$/, '');
         const under = finalPath.startsWith(novelPath + '/') ||
             (fh !== rh && /^\/(book|novel)\/[^/]+\/[^/]+/.test(finalPath));
-        if (!under) return fail;
+        if (!under) return bad('redirected away from the novel: ' + finalPath);
 
         let doc;
         try {
             doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
         } catch (e) {
-            return fail;
+            return bad('unreadable page');
         }
 
         const ogEl = doc.querySelector('meta[property="og:title"]');
         const og = ogEl ? (ogEl.getAttribute('content') || '').trim() : '';
         const docTitle = (doc.title || '').trim();
-        if (/page not found|\b404\b/i.test(og + ' ' + docTitle)) return fail;
 
         const numRe = new RegExp('chapter[\\s_-]*0*' + n + '(?!\\d)', 'i');
         const texts = [og, docTitle]
@@ -835,9 +914,11 @@
 
         const url = finalU.origin + finalU.pathname;
 
-        if (numRe.test(finalPath) || texts.some(t => numRe.test(t))) return { state: 'ok', url };
-        if (texts.length === 0) return { state: 'weak', url };
-        return fail;
+        // Chapter number found in the URL or page -> ok (so "Chapter 404" is not mistaken for an error page)
+        if (numRe.test(finalPath) || texts.some(t => numRe.test(t))) return { state: 'ok', url, why: 'chapter number found' };
+        if (/page not found|\b404\b/i.test(og + ' ' + docTitle)) return bad('page says "not found"');
+        if (texts.length === 0) return { state: 'weak', url, why: 'no headings to confirm chapter number' };
+        return bad('chapter number ' + n + ' not on page: ' + texts.slice(0, 3).join(' | '));
     }
 
     /* ------------------------------------------------------------------ *
@@ -862,7 +943,7 @@
     // Probes candidate URLs (a few at a time) and reports the HIGHEST-PRIORITY one that verifies.
     //   judge(response, url) -> { state: 'ok' | 'weak' | 'fail', url }
     //   done(result | null)  -> null when nothing verified
-    function probeCandidates(candidates, judge, gen, done) {
+    function probeCandidates(candidates, judge, gen, done, label) {
         if (!candidates.length || typeof GM_xmlhttpRequest !== 'function') {
             done(null);
             return;
@@ -904,6 +985,7 @@
                 settled = true;
                 active--;
                 results[i] = result;
+                dbg('probe', label || '', target, '->', result.state, result.why || '');
                 settle();
                 pump();
             };
@@ -938,17 +1020,32 @@
         const st = btn._ncs;
         if (!st || !st.ok || st.gen !== generation) return;
 
-        const token = ++st.token;
         const ch = latestChapter;
+        const style = CHAPTER_STYLE[st.site.key];
 
-        // Default / fallback: the novel page itself
+        // Nothing chapter-specific to do here: show the novel page
+        if (!style || !ch || ch.n === null || ch.n === undefined) {
+            st.chapKey = '';
+            st.token++;
+            setState(btn, st.site, 'ok', st.novelUrl);
+            return;
+        }
+
+        // Same request as the one already applied / in flight -> leave it alone, so a jittering title or a
+        // repeated refresh can never restart (and keep cancelling) a slow site's check.
+        const chapKey = style === 'number' ? String(ch.n) : [ch.n, ch.title, ch.rawSlug].join('|');
+        if (st.chapKey === chapKey) return;
+        st.chapKey = chapKey;
+
+        const token = ++st.token;
+
+        // Meanwhile (and as the fallback): the novel page itself
         setState(btn, st.site, 'ok', st.novelUrl);
-
-        if (!CHAPTER_STYLE[st.site.key] || !ch || ch.n === null || ch.n === undefined) return;
 
         const cacheKey = 'ch:' + st.novelUrl + ':' + ch.n;
         const cached = cacheGet(cacheKey);
         if (cached) {
+            dbg(st.site.key, 'chapter', ch.n, 'cache hit', cached);
             setState(btn, st.site, 'ok', cached, 'Chapter ' + ch.n);
             return;
         }
@@ -959,14 +1056,17 @@
             (response, url) => judgeChapter(response, url, st.novelUrl, ch.n),
             st.gen,
             r => {
+                // Remember a verified result even if the chapter on screen has already moved on
+                if (r && r.state === 'ok') cacheSet(cacheKey, r.url);
                 if (token !== st.token) return; // a newer chapter was requested meanwhile
                 if (r) {
-                    if (r.state === 'ok') cacheSet(cacheKey, r.url);
                     setState(btn, st.site, 'ok', r.url, 'Chapter ' + ch.n);
                 } else {
+                    dbg(st.site.key, 'chapter', ch.n, 'NOT FOUND - tried', candidates);
                     setState(btn, st.site, 'ok', st.novelUrl, 'novel page (chapter link not found)');
                 }
-            }
+            },
+            st.site.key + ' chapter ' + ch.n
         );
     }
 
@@ -978,7 +1078,7 @@
 
     // Step 1 for a button: find + verify the novel page on the target site, then hand over to applyChapter.
     function resolveLink(site, info, btn, gen, onFail) {
-        const st = btn._ncs = { site, gen, ok: false, novelUrl: '', token: 0 };
+        const st = btn._ncs = { site, gen, ok: false, novelUrl: '', token: 0, chapKey: '' };
 
         const candidates = getCandidateUrls(site.key, info);
         if (candidates.length === 0) {
@@ -997,6 +1097,7 @@
         const cacheKey = site.key + ':' + info.key;
         const cached = cacheGet(cacheKey);
         if (cached) {
+            dbg(site.key, 'novel cache hit', cached);
             st.ok = true;
             st.novelUrl = cached;
             applyChapter(btn);
@@ -1005,22 +1106,26 @@
 
         // Until something verifies, point at the best guess
         setState(btn, site, 'checking', candidates[0]);
+        dbg(site.key, 'novel: probing', candidates.length, 'candidates, first 8:', candidates.slice(0, 8));
 
         probeCandidates(
             candidates,
-            (response, url) => judgeResponse(response, url, site.key, info.key),
+            (response, url) => judgeResponse(response, url, site.key, info),
             gen,
             r => {
                 if (!r) {
+                    dbg(site.key, 'novel NOT FOUND - nothing verified');
                     setState(btn, site, 'unverified', candidates[0]);
                     if (onFail) onFail();
                     return;
                 }
+                dbg(site.key, 'novel verified', r.url, '(' + r.state + ')');
                 if (r.state === 'ok') cacheSet(cacheKey, r.url);
                 st.ok = true;
                 st.novelUrl = r.url;
                 applyChapter(btn);
-            }
+            },
+            site.key + ' novel'
         );
     }
 
