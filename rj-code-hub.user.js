@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RJ Code Hub – asmr.one / DLsite / JapaneseASMR
 // @namespace    Violentmonkey Scripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  Jump between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
 // @author       Claude
 // @match        *://asmr.one/*
@@ -134,7 +134,7 @@
   /* ================= DESKTOP UI ================= */
   const DesktopUI = (() => {
     /* ------------------------------------------------------------------ *
-     *  DESKTOP UI – row of buttons, placed per site so it clears the
+     *  DESKTOP UI – vertical list of buttons, placed per site so it clears the
      *  site's own header / widgets (same spots the old scripts used).
      *    asmr.one          : top 60px  / right 20px  (below the top bar)
      *    dlsite.com        : bottom 60px / right 20px
@@ -154,12 +154,12 @@
         <style>
           .bar{
             position:fixed; z-index:2147483646;
-            display:flex; flex-direction:row-reverse; flex-wrap:wrap; gap:8px;
+            display:flex; flex-direction:column; align-items:flex-end; gap:8px;
             max-width:calc(100vw - 40px);
             font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
           }
           .asmr{top:60px; right:20px}
-          .dlsite{bottom:60px; right:20px}
+          .dlsite{bottom:60px; right:20px; flex-direction:column-reverse} /* anchored at the bottom: grows upward, first button sits on the line */
           .jasmr{top:20px; right:20px}
           .btn{
             display:inline-block; box-sizing:border-box;
