@@ -3,6 +3,7 @@
 // @namespace    Violentmonkey Scripts
 // @version      1.0.0
 // @description  Jump between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
+// @author       Claude
 // @match        *://asmr.one/*
 // @match        *://*.asmr.one/*
 // @match        https://japaneseasmr.com/*
