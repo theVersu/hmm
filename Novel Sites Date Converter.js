@@ -3,7 +3,7 @@
 // @namespace    https://violentmonkey.github.io/
 // @version      3.5
 // @description  Modular script for site-specific date formatting across novel platforms.
-// @author       You
+// @author       Gemini
 // @match        *://*.webnovel.com/*
 // @match        *://*.mvlempyr.io/*
 // @match        *://*.novelfire.net/*
