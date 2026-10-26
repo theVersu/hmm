@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.7
+// @version      1.8
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
 // @author       AI Collaborator
 // @match        *://*.webnovel.com/*
@@ -77,15 +77,17 @@
     // Mobile layout: sidebar is hidden and slides in from the left when the small tab is tapped.
     const MOBILE_TAB_TOP = '50%';   // vertical position of the pull tab (e.g. '35%' to move it up)
 
-    // Chapter links can only be built for these targets. Webnovel (its chapter URLs use its own chapter IDs) and
-    // Mvlempyr (URL contains a Mvlempyr-specific novel ID) always get the novel page instead.
+    // Chapter links can be built for every target except Webnovel (its chapter URLs use its own chapter IDs),
+    // which always gets a search page instead.
     //   'number' = .../chapter-16                      (NovelFire + NovelPhoenix: same software/layout)
     //   'title'  = .../chapter-16-into-the-breach      (NovelPing / NovelArrow)
+    //   'mvlempyr' = /chapter/<novel id>-16            (the id is the cover image's file name: .../images/900/14613.webp)
     const CHAPTER_STYLE = {
         novelfire: 'number',
         novelphoenix: 'number',
         novelping: 'title',
-        novelarrow: 'title'
+        novelarrow: 'title',
+        mvlempyr: 'mvlempyr'
     };
 
     const DEBUG = false;            // true = log what the script read from the page to the browser console
@@ -331,6 +333,12 @@
         const withTitle = Array.from(new Set(titleSlugs.filter(Boolean))).map(t => `${num}-${t}`);
 
         return Array.from(new Set(withTitle.concat([num]).map(s => `${base}/${s}`))).slice(0, 8);
+    }
+
+    // "https://assets.mvlempyr.app/images/900/14613.webp" -> "14613"
+    function mvlIdFromUrl(str) {
+        const m = /mvlempyr\.app\/images\/(?:\d+\/)?(\d+)\.(?:webp|png|jpe?g|avif|gif)/i.exec(str || '');
+        return m ? m[1] : '';
     }
 
     /* ---- pure helpers end ---- */
@@ -722,6 +730,7 @@
 
         let title = '';
         let chapter = null;
+        let mvlId = '';
 
         if (isWebnovel) {
             if (onNovelPath && chapterSeg) {
@@ -757,6 +766,13 @@
             }
             // anywhere else on Webnovel (home, lists, rankings...): not a novel page -> no title
         } else {
+            // Mvlempyr chapter URL: /chapter/<novel id>-<chapter number>
+            const mv = /mvlempyr/i.test(host) ? path.match(/^\/chapter\/(\d+)-(\d+)\/?$/) : null;
+            if (mv) {
+                mvlId = mv[1];
+                chapter = { n: parseInt(mv[2], 10), title: '', rawSlug: '' };
+            }
+
             if (chapterSeg) {
                 const m = chapterSeg.match(/^chapter[-_]?0*(\d+)(?:[-_](.+))?$/i);
                 if (m) chapter = { n: parseInt(m[1], 10), title: '', rawSlug: (m[2] || '').toLowerCase() };
@@ -795,7 +811,8 @@
             // exact slug is only reusable when it came from a non-Webnovel site
             rawSlug: isWebnovel ? '' : slug,
             key,
-            chapter
+            chapter,
+            mvlId
         };
     }
 
@@ -854,17 +871,134 @@
 
         const url = finalU.origin + finalU.pathname;
 
+        // Mvlempyr: the cover image's file name is the novel id needed for chapter links
+        const novelId = siteKey === 'mvlempyr' ? extractMvlempyrId(doc, response.responseText || '', expectedKey) : '';
+
         // A title match always wins (so a novel actually named "...404..." or "...Not Found" is fine)
-        if (allTexts.some(t => titleMatches(expectedKey, compact(t)))) return { state: 'ok', url, why: 'title match' };
-        if (allTexts.some(t => tokensMatch(info.tokens, t))) return { state: 'ok', url, why: 'title match (loose)' };
+        if (allTexts.some(t => titleMatches(expectedKey, compact(t)))) return { state: 'ok', url, why: 'title match', novelId };
+        if (allTexts.some(t => tokensMatch(info.tokens, t))) return { state: 'ok', url, why: 'title match (loose)', novelId };
 
         // Soft-404 (page returns 200 but says it doesn't exist)
         if (allTexts.some(t => /\b(404|page not found|not found)\b/i.test(t))) return bad('page says "not found"');
 
         // Nothing to compare against -> can't prove it, but it isn't clearly wrong either
-        if (headings.length === 0) return { state: 'weak', url, why: 'no title on page to compare' };
+        if (headings.length === 0) return { state: 'weak', url, why: 'no title on page to compare', novelId };
 
         return bad('different title: ' + allTexts.slice(0, 3).join(' | '));
+    }
+
+    // Finds the novel's id on a Mvlempyr novel page = file name of its cover image.
+    // Order: og:image / twitter:image -> an <img> whose alt matches the novel -> the only cover id on the page.
+    // (Never "the first image": recommended novels on the same page have their own covers.)
+    function extractMvlempyrId(doc, html, expectedKey) {
+        try {
+            for (const sel of ['meta[property="og:image"]', 'meta[name="twitter:image"]']) {
+                const el = doc.querySelector(sel);
+                const id = mvlIdFromUrl(el ? el.getAttribute('content') : '');
+                if (id) return id;
+            }
+
+            const imgs = Array.from(doc.querySelectorAll('img'));
+            const imgUrl = img => ['src', 'data-src', 'srcset', 'data-srcset']
+                .map(a => img.getAttribute(a) || '').join(' ');
+
+            for (const img of imgs) {
+                const id = mvlIdFromUrl(imgUrl(img));
+                if (!id) continue;
+                const alt = compact((img.getAttribute('alt') || '') + ' ' + (img.getAttribute('title') || ''));
+                if (alt && expectedKey && (alt.includes(expectedKey) || expectedKey.includes(alt))) return id;
+            }
+
+            const ids = new Set();
+            imgs.forEach(img => { const id = mvlIdFromUrl(imgUrl(img)); if (id) ids.add(id); });
+            const re = /mvlempyr\.app\/images\/(?:\d+\/)?(\d+)\.(?:webp|png|jpe?g|avif|gif)/gi;
+            let m;
+            while ((m = re.exec(html || '')) !== null) ids.add(m[1]);
+            if (ids.size === 1) return Array.from(ids)[0];
+        } catch (e) {}
+        return '';
+    }
+
+    // Verifies a Mvlempyr chapter url: /chapter/<id>-<n>
+    function judgeMvlempyrChapter(response, requestedUrl, id, n, info) {
+        const bad = why => ({ state: 'fail', url: requestedUrl, why });
+        if (!response) return bad('no response');
+        if (response.status !== 200) return bad('HTTP ' + response.status);
+
+        let finalU, reqU;
+        try {
+            finalU = new URL(response.finalUrl || requestedUrl);
+            reqU = new URL(requestedUrl);
+        } catch (e) {
+            return bad('bad url');
+        }
+        if (bareHost(finalU.hostname) !== bareHost(reqU.hostname)) return bad('redirected to another site');
+
+        const path = finalU.pathname.replace(/\/+$/, '');
+        if (path !== '/chapter/' + id + '-' + n) return bad('redirected elsewhere: ' + path);
+
+        let doc;
+        try {
+            doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
+        } catch (e) {
+            return bad('unreadable page');
+        }
+
+        const ogEl = doc.querySelector('meta[property="og:title"]');
+        const og = ogEl ? (ogEl.getAttribute('content') || '').trim() : '';
+        const docTitle = (doc.title || '').trim();
+        const heads = [og].concat(Array.from(doc.querySelectorAll('h1, h2')).slice(0, 8).map(h => h.textContent.trim())).filter(Boolean);
+        const texts = docTitle ? heads.concat(docTitle) : heads;
+
+        const url = finalU.origin + finalU.pathname;
+        const numRe = new RegExp('chapter[\\s_-]*0*' + n + '(?!\\d)', 'i');
+
+        if (texts.some(t => titleMatches(info.key, compact(t)) || tokensMatch(info.tokens, t))) return { state: 'ok', url, why: 'novel title on page' };
+        if (texts.some(t => numRe.test(t))) return { state: 'weak', url, why: 'chapter number on page (novel title not shown)' };
+        if (/page not found|\b404\b/i.test(texts.join(' '))) return bad('page says "not found"');
+        // client-rendered shell: nothing to read, but the URL pattern is exactly right
+        if (heads.length === 0) return { state: 'weak', url, why: 'no headings to confirm' };
+        return bad('chapter ' + n + ' / novel not on page: ' + texts.slice(0, 3).join(' | '));
+    }
+
+    // Novel id for a Mvlempyr novel page: remembered, else read from the page's cover image.
+    function ensureMvlempyrId(st, cb) {
+        if (st.novelId) return cb(st.novelId);
+
+        const cached = cacheGet('mvid:' + st.novelUrl);
+        if (cached) {
+            st.novelId = cached;
+            return cb(cached);
+        }
+
+        if (typeof GM_xmlhttpRequest !== 'function') return cb('');
+        const gen = st.gen;
+        try {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: st.novelUrl,
+                timeout: PROBE_TIMEOUT_MS,
+                onload: response => {
+                    if (gen !== generation) return;
+                    let id = '';
+                    try {
+                        const doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
+                        id = extractMvlempyrId(doc, response.responseText || '', latestKey);
+                    } catch (e) {}
+                    dbg('mvlempyr novel id from page:', id || '(not found)');
+                    if (id) {
+                        cacheSet('mvid:' + st.novelUrl, id);
+                        st.novelId = id;
+                    }
+                    cb(id);
+                },
+                onerror: () => cb(''),
+                ontimeout: () => cb(''),
+                onabort: () => cb('')
+            });
+        } catch (e) {
+            cb('');
+        }
     }
 
     // Verifies a CHAPTER url under an already-verified novel url.
@@ -927,6 +1061,9 @@
 
     let generation = 0;        // bumped on every rebuild so late async results are ignored
     let latestChapter = null;  // chapter currently shown on the page (re-read every tick)
+    let latestInfo = { key: '', tokens: [] };
+    let latestKey = '';
+    let lastMvlRemembered = '';
 
     function setState(btn, site, state, url, note) {
         if (url) btn.href = url;
@@ -1033,7 +1170,7 @@
 
         // Same request as the one already applied / in flight -> leave it alone, so a jittering title or a
         // repeated refresh can never restart (and keep cancelling) a slow site's check.
-        const chapKey = style === 'number' ? String(ch.n) : [ch.n, ch.title, ch.rawSlug].join('|');
+        const chapKey = (style === 'number' || style === 'mvlempyr') ? String(ch.n) : [ch.n, ch.title, ch.rawSlug].join('|');
         if (st.chapKey === chapKey) return;
         st.chapKey = chapKey;
 
@@ -1047,6 +1184,36 @@
         if (cached) {
             dbg(st.site.key, 'chapter', ch.n, 'cache hit', cached);
             setState(btn, st.site, 'ok', cached, 'Chapter ' + ch.n);
+            return;
+        }
+
+        // Mvlempyr: needs the novel id (cover image name) before the URL can even be built
+        if (style === 'mvlempyr') {
+            ensureMvlempyrId(st, id => {
+                if (token !== st.token || st.gen !== generation) return;
+                if (!id) {
+                    dbg('mvlempyr: novel id not found on', st.novelUrl);
+                    setState(btn, st.site, 'ok', st.novelUrl, 'novel page (novel id not found)');
+                    return;
+                }
+                const url = new URL(st.novelUrl).origin + '/chapter/' + id + '-' + ch.n;
+                probeCandidates(
+                    [url],
+                    (response, u) => judgeMvlempyrChapter(response, u, id, ch.n, latestInfo),
+                    st.gen,
+                    r => {
+                        if (r && r.state === 'ok') cacheSet(cacheKey, r.url);
+                        if (token !== st.token) return;
+                        if (r) {
+                            setState(btn, st.site, 'ok', r.url, 'Chapter ' + ch.n);
+                        } else {
+                            dbg('mvlempyr chapter NOT FOUND', url);
+                            setState(btn, st.site, 'ok', st.novelUrl, 'novel page (chapter link not found)');
+                        }
+                    },
+                    'mvlempyr chapter ' + ch.n
+                );
+            });
             return;
         }
 
@@ -1078,7 +1245,7 @@
 
     // Step 1 for a button: find + verify the novel page on the target site, then hand over to applyChapter.
     function resolveLink(site, info, btn, gen, onFail) {
-        const st = btn._ncs = { site, gen, ok: false, novelUrl: '', token: 0, chapKey: '' };
+        const st = btn._ncs = { site, gen, ok: false, novelUrl: '', novelId: '', token: 0, chapKey: '' };
 
         const candidates = getCandidateUrls(site.key, info);
         if (candidates.length === 0) {
@@ -1123,6 +1290,10 @@
                 if (r.state === 'ok') cacheSet(cacheKey, r.url);
                 st.ok = true;
                 st.novelUrl = r.url;
+                if (r.novelId) {
+                    st.novelId = r.novelId;
+                    cacheSet('mvid:' + r.url, r.novelId);
+                }
                 applyChapter(btn);
             },
             site.key + ' novel'
@@ -1323,6 +1494,14 @@
 
         const info = getSourceInfo();
         latestChapter = info.chapter;
+        latestInfo = info;
+        latestKey = info.key;
+
+        // On a Mvlempyr chapter page the novel id is right in the URL - remember it for later trips back to Mvlempyr
+        if (info.mvlId && info.slug && lastMvlRemembered !== info.slug + info.mvlId) {
+            lastMvlRemembered = info.slug + info.mvlId;
+            cacheSet('mvid:' + SITE_PREFIX.mvlempyr + info.slug, info.mvlId);
+        }
 
         // Rebuild only when the NOVEL changes (or the title became known / layout mode changed).
         const sig = info.key + '|' + (info.title ? 't' : 's') + '|' + (mobile ? 'm' : 'd');
