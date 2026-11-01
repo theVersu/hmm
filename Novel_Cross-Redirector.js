@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      1.9
+// @version      2.0
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
 // @author       AI Collaborator
 // @match        *://*.webnovel.com/*
@@ -25,8 +25,8 @@
 // @connect      yueimg.com
 // @connect      mvlempyr.app
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Cross-Redirector.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Cross-Redirector.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel_Cross-Redirector.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel_Cross-Redirector.js
 // ==/UserScript==
 
 (function () {
@@ -41,6 +41,20 @@
     const PROBE_TIMEOUT_MS = 12000;
     const PROBE_CONCURRENCY = 3;                   // parallel probes per site
     const MAX_CANDIDATES = 42;
+    const MISS_TTL_MS = 6 * 60 * 60 * 1000;       // a novel that is not on a site is not re-checked for 6 hours
+    const RATE_LIMIT_COOLDOWN_MS = 90 * 1000;     // pause a site this long after it says "rate limited"
+
+    // Politeness toward each site: minimum gap between requests and how many may run at once.
+    // NovelFire / NovelPhoenix sit behind Cloudflare, which blocks (error 1015) a burst of requests -
+    // and the block hits YOUR browser too, not just the script.
+    const HOST_RULES = {
+        'novelfire.net': { gap: 1100, par: 1 },
+        'novelphoenix.com': { gap: 1100, par: 1 },
+        'novelping.com': { gap: 600, par: 2 },
+        'novelarrow.com': { gap: 600, par: 2 },
+        'mvlempyr.io': { gap: 350, par: 2 },
+        'webnovel.com': { gap: 350, par: 2 }
+    };
 
     // Suffixes sites append to disambiguate novels. Tried in this order after the bare slug.
     const SUFFIXES = ['', '-wn', '-novel', '-v1', '-v2', '-kr-web-novel', '-web-novel'];
@@ -259,7 +273,8 @@
         return Array.from(new Set(bases.filter(Boolean)));
     }
 
-    function getCandidateUrls(siteKey, info) {
+    function getCandidateUrls(siteKey, info, withSuffixes) {
+        if (withSuffixes === undefined) withSuffixes = true;
         if (siteKey === 'webnovel') {
             const words = (info.title || stripSuffixes(info.slug)).replace(/-/g, ' ');
             return [`https://www.webnovel.com/search?keywords=${encodeURIComponent(words)}`];
@@ -276,7 +291,7 @@
         // Suffix-major: every spelling is tried with the most common (empty) suffix before moving on,
         // so a long list of spellings can never push the right one past the cap.
         const bases = getBaseSlugs(info);
-        for (const suf of SUFFIXES) {
+        for (const suf of (withSuffixes ? SUFFIXES : [''])) {
             for (const base of bases) {
                 list.push(prefix + base + suf);
             }
@@ -395,6 +410,47 @@
         return Array.from(new Set(out.filter(q => q && q.length >= 3)));
     }
 
+    // Words too common in web-novel titles to prove two titles are the same novel
+    const GENERIC_WORDS = new Set([
+        'system', 'reborn', 'reincarnated', 'reincarnation', 'apocalypse', 'world', 'new', 'life', 'litrpg', 'isekai',
+        'op', 'mc', 'novel', 'story', 'legend', 'return', 'returned', 'became', 'become', 'only', 'own',
+        'strongest', 'best', 'great', 'first', 'last', 'time', 'era', 'age', 'level', 'rebirth', 'transmigrated'
+    ]);
+
+    function distinctiveOverlap(expected, text) {
+        const pick = list => list.filter(t => !STOP_WORDS.has(t) && !GENERIC_WORDS.has(t));
+        const a = new Set(pick(expected || []));
+        const b = new Set(pick(tokens(text)));
+        let shared = 0;
+        a.forEach(t => { if (b.has(t)) shared++; });
+        return { shared, needed: Math.min(2, a.size) };
+    }
+
+    // Is this search/listing result plausibly the SAME novel under a changed title?
+    // (similar overall + sharing at least two distinctive words, e.g. "barbarian queen")
+    function isSameNovel(expectedTokens, text) {
+        if (similarity(expectedTokens, text) < 0.25) return false;
+        const o = distinctiveOverlap(expectedTokens, text);
+        return o.needed > 0 && o.shared >= o.needed;
+    }
+
+    // Spellings of an author's name as used in URLs / search boxes:
+    //   'slug'   -> pancakeswitch, pancakes-witch      (NovelFire / NovelPhoenix: /author/pancakeswitch)
+    //   'name'   -> PancakesWitch, Pancakes Witch      (NovelPing: /author/PancakesWitch, /author/Pancakes%20Witch)
+    //   'search' -> PancakesWitch, Pancakes Witch      (search box)
+    function authorNameVariants(author, mode) {
+        const raw = (author || '').trim();
+        const words = raw.replace(/([a-z])([A-Z])/g, '$1 $2').split(/[\s_.\-]+/).filter(Boolean);
+        if (!words.length) return [];
+        const joined = words.join('');
+        const spaced = words.join(' ');
+        const hyphen = words.join('-');
+        const list = mode === 'slug' ? [joined.toLowerCase(), hyphen.toLowerCase()]
+            : mode === 'name' ? [raw, joined, spaced]
+            : [joined, spaced];
+        return Array.from(new Set(list.filter(Boolean)));
+    }
+
     /* ---- pure helpers end ---- */
 
     /* ------------------------------------------------------------------ *
@@ -430,6 +486,79 @@
                 alert('Saved links cleared. Reload the page.');
             } catch (e) {}
         });
+    }
+
+    /* ------------------------------------------------------------------ *
+     *  Request throttling (per site) + rate-limit cooldown
+     * ------------------------------------------------------------------ */
+
+    const hostState = {};
+
+    function hostOf(url) {
+        try { return bareHost(new URL(url).hostname); } catch (e) { return ''; }
+    }
+
+    // HTTP 429 or Cloudflare's "Error 1015 - You are being rate limited" page
+    function isRateLimited(r) {
+        return !!r && (r.status === 429 ||
+            (r.status >= 400 && /error\s*1015|you are being rate limited/i.test((r.responseText || '').slice(0, 6000))));
+    }
+
+    // GM_xmlhttpRequest through a per-site queue: spaced out, limited parallelism, paused after a rate-limit reply.
+    // opts.skip() -> true drops a queued request that is no longer wanted (e.g. the sidebar was rebuilt).
+    function throttledRequest(opts) {
+        if (typeof GM_xmlhttpRequest !== 'function') {
+            if (opts.onerror) opts.onerror();
+            return;
+        }
+        const h = hostOf(opts.url);
+        const st = hostState[h] || (hostState[h] = { queue: [], active: 0, last: 0, coolUntil: 0, timer: null });
+        st.queue.push(opts);
+        pumpHost(h);
+    }
+
+    function pumpHost(h) {
+        const st = hostState[h];
+        const rule = HOST_RULES[h] || { gap: 250, par: 3 };
+
+        while (st.queue.length && st.queue[0].skip && st.queue[0].skip()) st.queue.shift();
+        if (st.timer || !st.queue.length || st.active >= rule.par) return;
+
+        const now = Date.now();
+        const wait = Math.max(st.coolUntil - now, st.last + rule.gap - now, 0);
+        if (wait > 0) {
+            st.timer = setTimeout(() => { st.timer = null; pumpHost(h); }, wait);
+            return;
+        }
+
+        const o = st.queue.shift();
+        st.active++;
+        st.last = Date.now();
+        let ended = false;
+
+        const end = r => {
+            if (ended) return;
+            ended = true;
+            st.active--;
+            if (isRateLimited(r)) {
+                st.coolUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+                dbg(h, 'RATE LIMITED - pausing requests to this site for', RATE_LIMIT_COOLDOWN_MS / 1000, 's');
+            }
+            pumpHost(h);
+        };
+
+        try {
+            GM_xmlhttpRequest(Object.assign({}, o, {
+                onload: r => { end(r); if (o.onload) o.onload(r); },
+                onerror: e => { end(null); if (o.onerror) o.onerror(e); },
+                ontimeout: e => { end(null); if (o.ontimeout) o.ontimeout(e); },
+                onabort: e => { end(null); if (o.onabort) o.onabort(e); }
+            }));
+        } catch (e) {
+            end(null);
+            if (o.onerror) o.onerror(e);
+        }
+        pumpHost(h);
     }
 
     /* ------------------------------------------------------------------ *
@@ -1042,34 +1171,21 @@
             return cb(cached);
         }
 
-        if (typeof GM_xmlhttpRequest !== 'function') return cb('');
         const gen = st.gen;
-        try {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url: st.novelUrl,
-                timeout: PROBE_TIMEOUT_MS,
-                onload: response => {
-                    if (gen !== generation) return;
-                    let id = '';
-                    try {
-                        const doc = new DOMParser().parseFromString(response.responseText || '', 'text/html');
-                        id = extractMvlempyrId(doc, response.responseText || '', latestKey);
-                    } catch (e) {}
-                    dbg('mvlempyr novel id from page:', id || '(not found)');
-                    if (id) {
-                        cacheSet('mvid:' + st.novelUrl, id);
-                        st.novelId = id;
-                    }
-                    cb(id);
-                },
-                onerror: () => cb(''),
-                ontimeout: () => cb(''),
-                onabort: () => cb('')
-            });
-        } catch (e) {
-            cb('');
-        }
+        gmFetch(st.novelUrl, response => {
+            if (gen !== generation) return;
+            let id = '';
+            try {
+                const doc = new DOMParser().parseFromString((response && response.responseText) || '', 'text/html');
+                id = extractMvlempyrId(doc, (response && response.responseText) || '', latestKey);
+            } catch (e) {}
+            dbg('mvlempyr novel id from page:', id || '(not found)');
+            if (id) {
+                cacheSet('mvid:' + st.novelUrl, id);
+                st.novelId = id;
+            }
+            cb(id);
+        }, gen);
     }
 
     // Verifies a CHAPTER url under an already-verified novel url.
@@ -1131,36 +1247,34 @@
      * ------------------------------------------------------------------ */
 
     // When no guessed URL exists on a site (the novel was renamed there, or exists under an older title), the
-    // site's own search is used: results are ranked by title similarity and each top result's page must
-    // credit the SAME AUTHOR before it is accepted.
-    //   {q} is replaced by the search phrase. The real endpoint is read from the site's own search form
-    //   (home page) when possible; these are only the fallback guesses.
-    const SEARCH_GUESS = {
-        novelfire: 'https://novelfire.net/search?keyword={q}',
-        novelphoenix: 'https://novelphoenix.com/search?keyword={q}',
-        novelping: 'https://novelping.com/search?keyword={q}',
-        novelarrow: 'https://novelarrow.com/search?keyword={q}'
+    // author's own page on that site is read: it lists every novel by that author. The listing entry that best
+    // matches the title is opened and must credit the same author before it is accepted.
+    //   page   : the author's page         ({a} = spelling of the name)
+    //   search : the site's author search   ({q} = name)
+    //   mode   : which spellings the site uses for author URLs (see authorNameVariants)
+    const SITE_AUTHOR = {
+        novelfire:    { page: 'https://novelfire.net/author/{a}',      search: 'https://novelfire.net/search?keyword={q}&type=author', title: 'https://novelfire.net/search?keyword={q}',      mode: 'slug' },
+        novelphoenix: { page: 'https://novelphoenix.com/author/{a}',   search: 'https://novelphoenix.com/search?keyword={q}&type=author', title: 'https://novelphoenix.com/search?keyword={q}', mode: 'slug' },
+        novelping:    { page: 'https://novelping.com/author/{a}',      search: 'https://novelping.com/search?keyword={q}',            title: 'https://novelping.com/search?keyword={q}',      mode: 'name' },
+        novelarrow:   { page: 'https://novelarrow.com/author/{a}',     search: 'https://novelarrow.com/search?keyword={q}',           title: 'https://novelarrow.com/search?keyword={q}',     mode: 'name' }
     };
-    const SEARCH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-    const DISCOVERY_MIN_SCORE = 0.2;   // title similarity needed before a search result is even opened
+    // Mvlempyr has no author page and a script-rendered search box, but a full "advanced search" page
+    const MVL_SEARCH = 'https://www.mvlempyr.io/advanced-search?gim=and&tim=and&chf=0&cht=15000&sort=new&q={q}';
 
-    function gmFetch(url, cb) {
+    function gmFetch(url, cb, gen) {
         if (typeof GM_xmlhttpRequest !== 'function') return cb(null);
         let done = false;
         const fin = r => { if (!done) { done = true; cb(r); } };
-        try {
-            GM_xmlhttpRequest({
-                method: 'GET',
-                url,
-                timeout: PROBE_TIMEOUT_MS,
-                onload: r => fin(r),
-                onerror: () => fin(null),
-                ontimeout: () => fin(null),
-                onabort: () => fin(null)
-            });
-        } catch (e) {
-            fin(null);
-        }
+        throttledRequest({
+            method: 'GET',
+            url,
+            timeout: PROBE_TIMEOUT_MS,
+            skip: gen === undefined ? null : () => gen !== generation,
+            onload: r => fin(r),
+            onerror: () => fin(null),
+            ontimeout: () => fin(null),
+            onabort: () => fin(null)
+        });
     }
 
     function parseHtml(text) {
@@ -1266,44 +1380,7 @@
     }
 
     // Reads the site's own search box: <form method=get action=/search><input name=keyword>
-    function searchEndpointFromForm(doc, pageUrl) {
-        try {
-            for (const form of Array.from(doc.querySelectorAll('form')).slice(0, 12)) {
-                if ((form.getAttribute('method') || 'get').toLowerCase() !== 'get') continue;
-                const input = form.querySelector('input[type="search"], input[name="keyword"], input[name="q"], input[name="s"], input[name="query"], input[name="search"], input[type="text"]');
-                const name = input && input.getAttribute('name');
-                if (!name) continue;
-                const u = new URL(form.getAttribute('action') || '/', pageUrl);
-                Array.from(form.querySelectorAll('input[type="hidden"]')).forEach(h => {
-                    if (h.getAttribute('name')) u.searchParams.set(h.getAttribute('name'), h.getAttribute('value') || '');
-                });
-                u.searchParams.set(name, 'NCSQUERY');
-                return u.href.replace('NCSQUERY', '{q}');
-            }
-        } catch (e) {}
-        return '';
-    }
 
-    function getSearchEndpoint(siteKey, cb) {
-        const ck = 'search:' + siteKey;
-        const cached = cacheGet(ck, SEARCH_TTL_MS);
-        if (cached) return cb(cached);
-
-        const guess = SEARCH_GUESS[siteKey];
-        if (!guess) return cb('');
-
-        const home = new URL(guess).origin + '/';
-        gmFetch(home, r => {
-            let ep = '';
-            if (r && r.status === 200) {
-                const doc = parseHtml(r.responseText);
-                if (doc) ep = searchEndpointFromForm(doc, r.finalUrl || home);
-            }
-            dbg(siteKey, 'search endpoint:', ep || ('(no form found, guessing) ' + guess));
-            if (ep) cacheSet(ck, ep);
-            cb(ep || guess);
-        });
-    }
 
     // All links to novel pages (/book/<slug> or /novel/<slug>) on a search-result page, with their titles
     function extractNovelLinks(doc, pageUrl) {
@@ -1342,78 +1419,111 @@
     }
 
     // Search the site, rank results by title similarity, accept the best one whose page credits the same author.
+
+    // Nothing verified and nothing found: send the button to the site's own search for this title instead of a dead URL.
+
+    // Read the author's page(s) on the target site, pick the listed novel that matches the title, and check that
+    // its own page credits the same author. cb(found | null, sawTemporaryProblem)
     function discoverNovel(siteKey, info, author, gen, cb) {
-        getSearchEndpoint(siteKey, endpoint => {
-            if (gen !== generation) return;
-            if (!endpoint) return cb(null);
+        const cfg = SITE_AUTHOR[siteKey];
+        const authorKey = compact(author);
+        if (!cfg || authorKey.length < 3) return cb(null, false);
 
-            const title = info.title || stripSuffixes(info.slug).replace(/-/g, ' ');
-            const queries = searchQueries(title, author);
-            const authorKey = compact(author);
-            if (authorKey.length < 3) return cb(null);
+        let transient = false;
+        const fetched = new Set();
+        const rejected = new Set();
+        const cands = new Map();
 
-            const opened = new Set();
-            let qi = 0;
-
-            const nextQuery = () => {
+        const seq = (items, fn, done) => {
+            let i = 0;
+            const step = () => {
                 if (gen !== generation) return;
-                if (qi >= queries.length) return cb(null);
+                if (i >= items.length) return done();
+                fn(items[i++], step);
+            };
+            step();
+        };
 
-                const q = queries[qi++];
-                const url = endpoint.replace('{q}', encodeURIComponent(q));
+        // Load a listing page (author page / search result) and collect every novel link on it
+        const loadListing = (url, next, onDoc) => {
+            if (fetched.has(url)) return next();
+            fetched.add(url);
+            gmFetch(url, r => {
+                if (gen !== generation) return;
+                if (!r || r.status === 429 || r.status === 403 || r.status >= 500) transient = true;
+                const doc = r && r.status === 200 ? parseHtml(r.responseText) : null;
+                if (doc) {
+                    extractNovelLinks(doc, r.finalUrl || url).forEach(l => {
+                        if (!cands.has(l.url)) cands.set(l.url, { url: l.url, text: l.text, score: similarity(info.tokens, l.text) });
+                    });
+                    if (onDoc) onDoc(doc, r.finalUrl || url);
+                }
+                dbg(siteKey, 'listing', url, '->', doc ? 'ok' : (r ? 'HTTP ' + r.status : 'no answer'), '| novels collected:', cands.size);
+                next();
+            }, gen);
+        };
 
-                gmFetch(url, r => {
+        // Best matching entries first; accept the first whose page credits the author
+        const pickVerified = done => {
+            const ranked = Array.from(cands.values())
+                .filter(c => !rejected.has(c.url) && isSameNovel(info.tokens, c.text))
+                .sort((x, y) => y.score - x.score)
+                .slice(0, 3);
+            dbg(siteKey, 'matching entries:', ranked.map(c => c.score.toFixed(2) + ' ' + c.url));
+
+            seq(ranked, (c, next) => {
+                gmFetch(c.url, rr => {
                     if (gen !== generation) return;
-                    const doc = r && r.status === 200 ? parseHtml(r.responseText) : null;
-                    const links = doc ? extractNovelLinks(doc, r.finalUrl || url) : [];
+                    if (!rr || rr.status === 429 || rr.status === 403 || rr.status >= 500) transient = true;
+                    if (rr && rr.status === 200 && pageCreditsAuthor(rr.responseText, authorKey)) return done(c);
+                    rejected.add(c.url);
+                    next();
+                }, gen);
+            }, () => done(null));
+        };
 
-                    const picks = links
-                        .map(l => ({ url: l.url, text: l.text, score: similarity(info.tokens, l.text) }))
-                        .filter(l => l.score >= DISCOVERY_MIN_SCORE && !opened.has(l.url))
-                        .sort((a, b) => b.score - a.score)
-                        .slice(0, 4);
-
-                    dbg(siteKey, 'search "' + q + '":', links.length, 'novel links,', picks.length, 'similar:',
-                        picks.map(p => p.score.toFixed(2) + ' ' + p.url));
-                    if (!picks.length) return nextQuery();
-
-                    let pending = picks.length;
-                    const good = [];
-                    picks.forEach(p => {
-                        opened.add(p.url);
-                        gmFetch(p.url, rr => {
-                            if (gen !== generation) return;
-                            const credited = !!(rr && rr.status === 200 && pageCreditsAuthor(rr.responseText, authorKey));
-                            dbg(siteKey, 'candidate', p.url, credited ? 'credits the author' : 'different/unknown author');
-                            if (credited) good.push(p);
-                            if (--pending === 0) {
-                                if (good.length) {
-                                    good.sort((a, b) => b.score - a.score);
-                                    cb({ url: good[0].url, score: good[0].score });
-                                } else {
-                                    nextQuery();
-                                }
+        // 1) the author's own page, under each spelling of the name
+        const pages = authorNameVariants(author, cfg.mode).map(n => cfg.page.replace('{a}', encodeURIComponent(n)));
+        seq(pages, (url, next) => {
+            loadListing(url, () => pickVerified(found => (found ? cb(found, transient) : next())));
+        }, () => {
+            // 2) the site's author search: finds spellings of the author we did not guess
+            const extraPages = [];
+            const searches = authorNameVariants(author, 'search').map(n => cfg.search.replace('{q}', encodeURIComponent(n)));
+            seq(searches, (url, next) => {
+                loadListing(url, next, (doc, pageUrl) => {
+                    Array.from(doc.querySelectorAll('a[href]')).slice(0, 400).forEach(a => {
+                        try {
+                            const u = new URL(a.getAttribute('href'), pageUrl);
+                            const m = u.pathname.match(/^\/author\/([^/]+)\/?$/);
+                            if (m && bareHost(u.hostname) === bareHost(new URL(pageUrl).hostname) &&
+                                (compact(safeDecode(m[1])) === authorKey || compact(a.textContent || '') === authorKey)) {
+                                extraPages.push(u.origin + u.pathname);
                             }
-                        });
+                        } catch (e) {}
                     });
                 });
-            };
-
-            nextQuery();
+            }, () => {
+                seq(Array.from(new Set(extraPages)).slice(0, 2), (url, next) => loadListing(url, next), () => {
+                    pickVerified(found => cb(found || null, transient));
+                });
+            });
         });
     }
 
-    // Nothing verified and nothing found: send the button to the site's own search for this title instead of a dead URL.
-    function searchFallbackUrl(siteKey, info, cb) {
-        getSearchEndpoint(siteKey, ep => {
-            if (!ep) return cb('');
-            // the title as it is on the source site usually isn't what the target calls it, so search the most
-            // distinctive single word of it instead (the user then picks from the list)
-            const title = info.title || stripSuffixes(info.slug).replace(/-/g, ' ');
-            const word = tokens(title).filter(t => !STOP_WORDS.has(t) && t.length >= 5).sort((a, b) => b.length - a.length)[0];
-            const q = word || searchQueries(title, '')[0] || '';
-            cb(q ? ep.replace('{q}', encodeURIComponent(q)) : '');
-        });
+    // Where a button points when the novel could not be found on a site: somewhere the user can find it by hand
+    function fallbackLink(siteKey, info, author) {
+        const title = info.title || stripSuffixes(info.slug).replace(/-/g, ' ');
+        if (siteKey === 'mvlempyr') {
+            const q = author || title.split(/\s*[:\u2013\u2014|]\s+/)[0];
+            return q ? { url: MVL_SEARCH.replace('{q}', encodeURIComponent(q)), note: 'not found - opens search' } : null;
+        }
+        const cfg = SITE_AUTHOR[siteKey];
+        if (!cfg) return null;
+        const names = author ? authorNameVariants(author, cfg.mode) : [];
+        if (names.length) return { url: cfg.page.replace('{a}', encodeURIComponent(names[0])), note: 'not found - opens author page' };
+        const word = tokens(title).filter(t => !STOP_WORDS.has(t) && t.length >= 5).sort((x, y) => y.length - x.length)[0];
+        return word ? { url: cfg.title.replace('{q}', encodeURIComponent(word)), note: 'not found - opens search' } : null;
     }
 
     /* ------------------------------------------------------------------ *
@@ -1443,7 +1553,7 @@
     //   done(result | null)  -> null when nothing verified
     function probeCandidates(candidates, judge, gen, done, label) {
         if (!candidates.length || typeof GM_xmlhttpRequest !== 'function') {
-            done(null);
+            done(null, false);
             return;
         }
 
@@ -1452,11 +1562,13 @@
         let active = 0;
         let finished = false;
 
+        // 2nd argument = "some candidates failed for a temporary reason" (blocked / rate-limited / no answer),
+        // so a failure is not remembered as "the novel is not on this site"
         function finish(r) {
             if (finished) return;
             finished = true;
             if (gen !== generation) return;
-            done(r);
+            done(r, results.some(x => x && x.transient));
         }
 
         function settle() {
@@ -1499,25 +1611,25 @@
                     setTimeout(send, 1500);
                     return true;
                 };
-                const failNow = () => complete({ state: 'fail', url: target, why: 'no answer' });
+                const failNow = () => complete({ state: 'fail', url: target, why: 'no answer', transient: true });
 
-                try {
-                    GM_xmlhttpRequest({
-                        method: 'GET',
-                        url: target,
-                        timeout: PROBE_TIMEOUT_MS,
-                        onload: response => {
-                            const res = judge(response, target);
-                            if (res.state === 'fail' && response && isTransient(response.status) && retry()) return;
-                            complete(res);
-                        },
-                        onerror: () => { if (!retry()) failNow(); },
-                        ontimeout: () => { if (!retry()) failNow(); },
-                        onabort: () => { if (!retry()) failNow(); }
-                    });
-                } catch (e) {
-                    failNow();
-                }
+                throttledRequest({
+                    method: 'GET',
+                    url: target,
+                    timeout: PROBE_TIMEOUT_MS,
+                    skip: () => gen !== generation,
+                    onload: response => {
+                        const res = judge(response, target);
+                        if (res.state === 'fail' && response && isTransient(response.status)) {
+                            if (retry()) return;
+                            res.transient = true;
+                        }
+                        complete(res);
+                    },
+                    onerror: () => { if (!retry()) failNow(); },
+                    ontimeout: () => { if (!retry()) failNow(); },
+                    onabort: () => { if (!retry()) failNow(); }
+                });
             };
             send();
         }
@@ -1678,52 +1790,13 @@
         });
     }
 
-    // No guessed URL exists on this site: the novel was probably renamed there. Search for it by title and
-    // accept a result only if its page credits the same author; otherwise point the button at the site's search.
-    function discoverOrGiveUp(site, info, btn, gen, st, firstGuess, cacheKey, onFail) {
-        const giveUp = () => {
-            searchFallbackUrl(site.key, info, searchUrl => {
-                if (gen !== generation) return;
-                setState(btn, site, 'unverified', searchUrl || firstGuess, searchUrl ? 'not found - opens search' : '');
-                if (onFail) onFail();
-            });
-        };
-
-        if (!SEARCH_GUESS[site.key]) {          // e.g. Mvlempyr: no plain-HTML search to use
-            setState(btn, site, 'unverified', firstGuess);
-            if (onFail) onFail();
-            return;
-        }
-
-        setState(btn, site, 'checking', firstGuess, 'searching');
-        ensureAuthor(info, author => {
-            if (gen !== generation) return;
-            if (!author) {
-                dbg(site.key, 'no author known for this novel - cannot match a renamed novel');
-                return giveUp();
-            }
-            discoverNovel(site.key, info, author, gen, found => {
-                if (gen !== generation) return;
-                if (!found) {
-                    dbg(site.key, 'search found nothing by', author);
-                    return giveUp();
-                }
-                dbg(site.key, 'FOUND by search:', found.url, '(similarity ' + found.score.toFixed(2) + ', author ' + author + ')');
-                cacheSet(cacheKey, found.url);
-                st.ok = true;
-                st.novelUrl = found.url;
-                st.novelNote = 'found by search (' + author + ')';
-                applyChapter(btn);
-            });
-        });
-    }
-
     // Step 1 for a button: find + verify the novel page on the target site, then hand over to applyChapter.
     function resolveLink(site, info, btn, gen, onFail) {
         const st = btn._ncs = { site, gen, ok: false, novelUrl: '', novelNote: '', novelId: '', token: 0, chapKey: '' };
 
-        const candidates = getCandidateUrls(site.key, info);
-        if (candidates.length === 0) {
+        // Stage 1: the likely URLs (no suffix). Suffix guesses (-wn, -novel ...) only come later, if needed.
+        const stage1 = getCandidateUrls(site.key, info, false);
+        if (stage1.length === 0) {
             setState(btn, site, 'unverified', site.defaultUrl);
             return;
         }
@@ -1731,12 +1804,13 @@
         // Webnovel target is a search page - nothing to verify, and no chapter links
         if (site.key === 'webnovel') {
             st.ok = true;
-            st.novelUrl = candidates[0];
-            setState(btn, site, 'ok', candidates[0], 'search');
+            st.novelUrl = stage1[0];
+            setState(btn, site, 'ok', stage1[0], 'search');
             return;
         }
 
         const cacheKey = site.key + ':' + info.key;
+        const missKey = 'miss:' + cacheKey;
         const cached = cacheGet(cacheKey);
         if (cached) {
             dbg(site.key, 'novel cache hit', cached);
@@ -1746,29 +1820,77 @@
             return;
         }
 
-        // Until something verifies, point at the best guess
-        setState(btn, site, 'checking', candidates[0]);
-        dbg(site.key, 'novel: probing', candidates.length, 'candidates, first 8:', candidates.slice(0, 8));
+        const success = (r, note) => {
+            dbg(site.key, 'novel verified', r.url, '(' + r.state + ')', note || '');
+            if (r.state === 'ok') cacheSet(cacheKey, r.url);
+            st.ok = true;
+            st.novelUrl = r.url;
+            st.novelNote = note || '';
+            if (r.novelId) {
+                st.novelId = r.novelId;
+                cacheSet('mvid:' + r.url, r.novelId);
+            }
+            applyChapter(btn);
+        };
+
+        // Nothing found. Remember that (unless the failures were only temporary) so the site is not asked again
+        // on every page; point the button at somewhere the user can look by hand.
+        const giveUp = (author, temporary, quiet) => {
+            if (gen !== generation) return;
+            if (!temporary) cacheSet(missKey, '1');
+            const fb = fallbackLink(site.key, info, author);
+            setState(btn, site, 'unverified', fb ? fb.url : stage1[0], fb ? fb.note : '');
+            if (onFail && !quiet) onFail();
+        };
+
+        if (cacheGet(missKey, MISS_TTL_MS)) {
+            dbg(site.key, 'known to be missing there (checked recently) - not asking again');
+            giveUp(cacheGet('author:' + info.key) || '', true, true);
+            return;
+        }
+
+        setState(btn, site, 'checking', stage1[0]);
+        dbg(site.key, 'novel: probing', stage1.length, 'likely URLs:', stage1.slice(0, 8));
 
         probeCandidates(
-            candidates,
+            stage1,
             (response, url) => judgeResponse(response, url, site.key, info),
             gen,
-            r => {
-                if (!r) {
-                    dbg(site.key, 'novel NOT FOUND by URL guesses - trying search');
-                    discoverOrGiveUp(site, info, btn, gen, st, candidates[0], cacheKey, onFail);
-                    return;
-                }
-                dbg(site.key, 'novel verified', r.url, '(' + r.state + ')');
-                if (r.state === 'ok') cacheSet(cacheKey, r.url);
-                st.ok = true;
-                st.novelUrl = r.url;
-                if (r.novelId) {
-                    st.novelId = r.novelId;
-                    cacheSet('mvid:' + r.url, r.novelId);
-                }
-                applyChapter(btn);
+            (r, temporary1) => {
+                if (r) return success(r);
+                dbg(site.key, 'no guessed URL exists');
+
+                const cfg = SITE_AUTHOR[site.key];
+                const authorNow = () => cacheGet('author:' + info.key) || '';
+
+                // Last resort: the suffix variants
+                const suffixes = () => {
+                    const rest = getCandidateUrls(site.key, info, true).filter(u => stage1.indexOf(u) === -1).slice(0, 14);
+                    probeCandidates(
+                        rest,
+                        (response, url) => judgeResponse(response, url, site.key, info),
+                        gen,
+                        (r2, temporary2) => (r2 ? success(r2) : giveUp(authorNow(), temporary1 || temporary2)),
+                        site.key + ' novel (suffixes)'
+                    );
+                };
+
+                if (!cfg) return suffixes();
+
+                setState(btn, site, 'checking', stage1[0], 'searching');
+                ensureAuthor(info, author => {
+                    if (gen !== generation) return;
+                    if (!author) {
+                        dbg(site.key, 'author unknown - cannot look the novel up by author');
+                        return suffixes();
+                    }
+                    discoverNovel(site.key, info, author, gen, (found, temporary3) => {
+                        if (gen !== generation) return;
+                        if (found) return success({ state: 'ok', url: found.url }, 'found via author ' + author);
+                        dbg(site.key, 'not found under author', author);
+                        giveUp(author, temporary1 || temporary3);
+                    });
+                });
             },
             site.key + ' novel'
         );
@@ -1855,6 +1977,14 @@
             return;
         }
 
+        // Logos are remembered for good: no request to the site (NovelFire / NovelPhoenix count every one)
+        const stored = cacheGet('logo:' + siteKey, 90 * 24 * 60 * 60 * 1000);
+        if (stored) {
+            imageBase64Cache[siteKey] = stored;
+            imgElement.src = stored;
+            return;
+        }
+
         imgElement.src = url;
 
         if (typeof GM_xmlhttpRequest === 'function') {
@@ -1878,11 +2008,13 @@
 
                                     const trimmedBase64 = canvas.toDataURL('image/png');
                                     imageBase64Cache[siteKey] = trimmedBase64;
+                                    cacheSet('logo:' + siteKey, trimmedBase64);
                                     imgElement.src = trimmedBase64;
                                 };
                                 tempImg.src = reader.result;
                             } else {
                                 imageBase64Cache[siteKey] = reader.result;
+                                cacheSet('logo:' + siteKey, reader.result);
                                 imgElement.src = reader.result;
                             }
                         };
