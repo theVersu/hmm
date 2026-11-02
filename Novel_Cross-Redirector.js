@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
 // @author       AI Collaborator
 // @match        *://*.webnovel.com/*
@@ -25,8 +25,8 @@
 // @connect      yueimg.com
 // @connect      mvlempyr.app
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel_Cross-Redirector.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel_Cross-Redirector.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Cross-Redirector.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Cross-Redirector.js
 // ==/UserScript==
 
 (function () {
@@ -1070,19 +1070,21 @@
         const allTexts = docTitle ? headings.concat(docTitle) : headings;
 
         const url = finalU.origin + finalU.pathname;
+        const h1s = Array.from(doc.querySelectorAll('h1')).map(h => h.textContent.trim()).filter(Boolean);
+        const pageTitle = (h1s[0] || meta('meta[property="og:title"]') || docTitle || '').slice(0, 200);
 
         // Mvlempyr: the cover image's file name is the novel id needed for chapter links
         const novelId = siteKey === 'mvlempyr' ? extractMvlempyrId(doc, response.responseText || '', expectedKey) : '';
 
         // A title match always wins (so a novel actually named "...404..." or "...Not Found" is fine)
-        if (allTexts.some(t => titleMatches(expectedKey, compact(t)))) return { state: 'ok', url, why: 'title match', novelId };
-        if (allTexts.some(t => tokensMatch(info.tokens, t))) return { state: 'ok', url, why: 'title match (loose)', novelId };
+        if (allTexts.some(t => titleMatches(expectedKey, compact(t)))) return { state: 'ok', url, why: 'title match', novelId, title: pageTitle };
+        if (allTexts.some(t => tokensMatch(info.tokens, t))) return { state: 'ok', url, why: 'title match (loose)', novelId, title: pageTitle };
 
         // Soft-404 (page returns 200 but says it doesn't exist)
         if (allTexts.some(t => /\b(404|page not found|not found)\b/i.test(t))) return bad('page says "not found"');
 
         // Nothing to compare against -> can't prove it, but it isn't clearly wrong either
-        if (headings.length === 0) return { state: 'weak', url, why: 'no title on page to compare', novelId };
+        if (headings.length === 0) return { state: 'weak', url, why: 'no title on page to compare', novelId, title: pageTitle };
 
         return bad('different title: ' + allTexts.slice(0, 3).join(' | '));
     }
@@ -1790,6 +1792,32 @@
         });
     }
 
+    // What the other buttons have already found for THIS novel: { siteKey, slug, title }.
+    // A site that cannot be searched (Mvlempyr) - or where the novel was renamed - tries these: a renamed novel
+    // usually has the same new slug / title everywhere (NovelPing's slug is also Mvlempyr's).
+    let slugPool = null;
+
+    function getPool(gen) {
+        if (!slugPool || slugPool.gen !== gen) slugPool = { gen, entries: [], subs: [], waiters: [], active: 0 };
+        return slugPool;
+    }
+
+    function poolAdd(gen, entry) {
+        const p = getPool(gen);
+        if (p.entries.some(e => e.siteKey === entry.siteKey && e.slug === entry.slug)) return;
+        p.entries.push(entry);
+        dbg('shared with the other buttons:', entry.siteKey, entry.slug, '|', entry.title);
+        p.subs.slice().forEach(fn => fn(entry));
+    }
+
+    // URLs worth trying on `siteKey` for a novel another site already identified
+    function poolCandidates(siteKey, entry) {
+        const prefix = SITE_PREFIX[siteKey];
+        const list = [prefix + entry.slug];
+        titleSlugVariants(entry.title).forEach(sl => list.push(prefix + sl));
+        return Array.from(new Set(list)).slice(0, 8);
+    }
+
     // Step 1 for a button: find + verify the novel page on the target site, then hand over to applyChapter.
     function resolveLink(site, info, btn, gen, onFail) {
         const st = btn._ncs = { site, gen, ok: false, novelUrl: '', novelNote: '', novelId: '', token: 0, chapKey: '' };
@@ -1811,18 +1839,41 @@
 
         const cacheKey = site.key + ':' + info.key;
         const missKey = 'miss:' + cacheKey;
+
+        // This button is "working" until it has an answer; once every button has one, waiting buttons give up
+        const pool = getPool(gen);
+        pool.active++;
+        let left = false;
+        const leave = () => {
+            if (left) return;
+            left = true;
+            pool.active--;
+            if (pool.active <= 0) pool.waiters.slice().forEach(w => w.check());
+        };
+        const lastSeg = u => safeDecode(u.replace(/\/+$/, '').split('/').pop());
+        const publish = (url, title) => poolAdd(gen, {
+            siteKey: site.key,
+            slug: lastSeg(url),
+            title: title || cacheGet('ptitle:' + url) || ''
+        });
+
         const cached = cacheGet(cacheKey);
         if (cached) {
             dbg(site.key, 'novel cache hit', cached);
             st.ok = true;
             st.novelUrl = cached;
             applyChapter(btn);
+            publish(cached);
+            leave();
             return;
         }
 
         const success = (r, note) => {
             dbg(site.key, 'novel verified', r.url, '(' + r.state + ')', note || '');
-            if (r.state === 'ok') cacheSet(cacheKey, r.url);
+            if (r.state === 'ok') {
+                cacheSet(cacheKey, r.url);
+                if (r.title) cacheSet('ptitle:' + r.url, r.title);
+            }
             st.ok = true;
             st.novelUrl = r.url;
             st.novelNote = note || '';
@@ -1831,11 +1882,14 @@
                 cacheSet('mvid:' + r.url, r.novelId);
             }
             applyChapter(btn);
+            publish(r.url, r.title);
+            leave();
         };
 
         // Nothing found. Remember that (unless the failures were only temporary) so the site is not asked again
         // on every page; point the button at somewhere the user can look by hand.
         const giveUp = (author, temporary, quiet) => {
+            leave();
             if (gen !== generation) return;
             if (!temporary) cacheSet(missKey, '1');
             const fb = fallbackLink(site.key, info, author);
@@ -1843,9 +1897,68 @@
             if (onFail && !quiet) onFail();
         };
 
+        // Out of ideas of its own: wait for the other buttons and try whatever novel they identified
+        // (same slug / same title as the page they found), until all of them have answered.
+        const waitForHints = (author, temporary, quiet, then) => {
+            leave();
+            let finished = false;
+            let inflight = 0;
+            const tried = new Set(stage1);
+
+            const stop = () => {
+                finished = true;
+                pool.subs = pool.subs.filter(f => f !== handle);
+                pool.waiters = pool.waiters.filter(w => w !== waiter);
+            };
+            const check = () => {
+                if (finished || inflight > 0 || pool.active > 0) return;
+                stop();
+                then();
+            };
+            const handle = entry => {
+                if (finished || entry.siteKey === site.key || !entry.title) return;
+                const cands = poolCandidates(site.key, entry).filter(u => !tried.has(u));
+                cands.forEach(u => tried.add(u));
+                if (!cands.length) return;
+
+                const exact = SITE_PREFIX[site.key] + entry.slug;
+                const probeInfo = { key: compact(entry.title), tokens: tokens(entry.title) };
+                inflight++;
+                dbg(site.key, 'trying what', entry.siteKey, 'found:', cands);
+                probeCandidates(
+                    cands,
+                    (response, url) => {
+                        const res = judgeResponse(response, url, site.key, probeInfo);
+                        // a page that shows no title proves little: only accept it for the verbatim slug
+                        return (res.state === 'weak' && url !== exact) ? { state: 'fail', url, why: 'unconfirmed variant' } : res;
+                    },
+                    gen,
+                    r => {
+                        inflight--;
+                        if (finished) return;
+                        if (r) {
+                            stop();
+                            success(r, 'same novel as on ' + entry.siteKey);
+                        } else {
+                            check();
+                        }
+                    },
+                    site.key + ' via ' + entry.siteKey
+                );
+            };
+            const waiter = { check };
+
+            pool.subs.push(handle);
+            pool.waiters.push(waiter);
+            pool.entries.slice().forEach(handle);
+            check();
+        };
+
+        // known miss (cached for a few hours): don't hammer the site again - but still use what the others found
         if (cacheGet(missKey, MISS_TTL_MS)) {
             dbg(site.key, 'known to be missing there (checked recently) - not asking again');
-            giveUp(cacheGet('author:' + info.key) || '', true, true);
+            const author = cacheGet('author:' + info.key) || '';
+            waitForHints(author, true, true, () => giveUp(author, true, true));
             return;
         }
 
@@ -1875,20 +1988,27 @@
                     );
                 };
 
-                if (!cfg) return suffixes();
+                // The other buttons' findings first (cheap, and the only route for a site that can't be searched),
+                // then the suffix guesses if there was no author to look the novel up by
+                const hintsThen = (author, temporary, needSuffixes) => {
+                    setState(btn, site, 'checking', stage1[0], 'waiting for the other sites');
+                    waitForHints(author, temporary, false, () => (needSuffixes ? suffixes() : giveUp(author, temporary)));
+                };
+
+                if (!cfg) return hintsThen('', temporary1, true);
 
                 setState(btn, site, 'checking', stage1[0], 'searching');
                 ensureAuthor(info, author => {
                     if (gen !== generation) return;
                     if (!author) {
                         dbg(site.key, 'author unknown - cannot look the novel up by author');
-                        return suffixes();
+                        return hintsThen('', temporary1, true);
                     }
                     discoverNovel(site.key, info, author, gen, (found, temporary3) => {
                         if (gen !== generation) return;
-                        if (found) return success({ state: 'ok', url: found.url }, 'found via author ' + author);
+                        if (found) return success({ state: 'ok', url: found.url, title: found.text }, 'found via author ' + author);
                         dbg(site.key, 'not found under author', author);
-                        giveUp(author, temporary1 || temporary3);
+                        hintsThen(author, temporary1 || temporary3, false);
                     });
                 });
             },
@@ -2170,6 +2290,22 @@
             if (site.key === 'mirror') {
                 // Find the domain that is online right now, then restyle + resolve against it
                 setState(btn, site, 'checking', site.defaultUrl);
+
+                // This button only starts working once the live domain is known. Until then it counts as "still
+                // working" for the other buttons, which wait for each other's findings before giving up.
+                let reserved = false;
+                if (info.key) {
+                    getPool(gen).active++;
+                    reserved = true;
+                }
+                const release = () => {
+                    if (!reserved) return;
+                    reserved = false;
+                    const pool = getPool(gen);
+                    pool.active--;
+                    if (pool.active <= 0) pool.waiters.slice().forEach(w => w.check());
+                };
+
                 detectLiveMirror(live => {
                     if (gen !== generation) return;
                     const m = live || MIRRORS[0]; // detection failed -> best guess, verified below
@@ -2185,6 +2321,7 @@
                     } else {
                         setState(btn, resolved, live ? 'ok' : 'unverified', m.home);
                     }
+                    release();   // resolveLink has registered itself by now
                 });
             } else {
                 if (info.key) {
