@@ -25,8 +25,8 @@
 // @connect      yueimg.com
 // @connect      mvlempyr.app
 // @run-at       document-end
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Cross-Redirector.js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel%20Cross-Redirector.js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel_Cross-Redirector.js
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Novel_Cross-Redirector.js
 // ==/UserScript==
 
 (function () {
