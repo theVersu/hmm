@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         Universal Timezone Converter to Poland Time
 // @namespace    http://tampermonkey.net/
-// @version      4.0
-// @description  Converts dates/times on whitelisted sites to Polish time (always 24h) and keeps the original in brackets.
-// @author       Claude
+// @version      4.1
+// @description  Adds Polish time (24h) in brackets next to times/dates found on whitelisted sites. Originals are left untouched.
 // @match        *://*/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -23,11 +22,11 @@
      * ===================================================================== */
     const CONFIG = {
         targetZone: 'Europe/Warsaw',
-        label: 'PL',                 // appended when a real timezone conversion happened
-        keepOriginal: true,          // keep the replaced text next to the new one
-        originalWrap: ['(', ')'],    // what surrounds the original text
-        convertDateOnly: true,       // "Oct 14, 2025" -> "Tue 14 Oct 2025 (Oct 14, 2025)"
-        convertTimeOnly: true,       // "3:00 PM"       -> "15:00 (3:00 PM)"
+        wrap: ['(', ')'],            // converted text is appended in these brackets
+        showLabel: false,            // true -> "(20:00 PL)"
+        label: 'PL',
+        showDayShift: false,         // true -> for time-only text, add "+1d"/"-1d" when Poland is on another day
+        convertTimeOnly: true,       // convert times that have no date next to them
         numericDateOrder: 'DMY',     // how to read ambiguous 03/04/2025 when it has a time: 'DMY' or 'MDY'
         debounceMs: 150
     };
@@ -119,8 +118,9 @@
     }
 
     const PL = { iana: CONFIG.targetZone };
-    const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-    const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    const FULL_WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+    const FULL_MONTHS = ['January', 'February', 'March', 'April', 'May', 'June', 'July',
+        'August', 'September', 'October', 'November', 'December'];
     const MONTH_IDX = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
 
     /* =====================================================================
@@ -166,7 +166,9 @@
 
     if (window.self === window.top) {
         GM_registerMenuCommand(
-            active ? `🔴 Turn OFF for ${domain}` : `🟢 Turn ON for ${domain}`,
+            active
+                ? `🟢 Converter is ON for ${domain} (click to turn OFF)`
+                : `🔴 Converter is OFF for ${domain} (click to turn ON)`,
             () => {
                 const list = getWhitelist();
                 setWhitelist(active ? list.filter(d => !hostMatches(host, d)) : [...list, domain]);
@@ -224,18 +226,18 @@
     const TZ_TOKEN =
         R`(?:(?:UTC|GMT)\s?[+-]\d{1,2}(?::?\d{2})?|[+-]\d{2}:?\d{2}|${tzNames}|` +
         R`[A-Z][A-Za-z]+\/[A-Za-z_]+(?:\/[A-Za-z_]+)?)(?![A-Za-z0-9/])`;
-    const tzPart = (s) => R`(?:\s*(?:\((?<zp${s}>${TZ_TOKEN})\)|(?<z${s}>${TZ_TOKEN})))`;
+    const tzPart = (s) => R`(?<tzf${s}>\s*(?:\((?<zp${s}>${TZ_TOKEN})\)|(?<z${s}>${TZ_TOKEN})))`;
 
     const MONTH =
         R`(?:${ci('january|february|march|april|may|june|july|august|september|october|november|december')}` +
         R`|${ci('jan|feb|mar|apr|jun|jul|aug|sept|sep|oct|nov|dec')})(?![A-Za-z])\.?`;
-    const ORD = R`(?:${ci('st|nd|rd|th')})?`;
+    const ORD = (n) => R`(?<${n}>(?:${ci('st|nd|rd|th')})?)`;
     const WD =
-        R`(?:(?<![A-Za-z])(?:${ci('mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?')})\.?,?\s+)?`;
+        R`(?:(?<![A-Za-z])(?<wd>${ci('mon(?:day)?|tue(?:s(?:day)?)?|wed(?:nesday)?|thu(?:r(?:s(?:day)?)?)?|fri(?:day)?|sat(?:urday)?|sun(?:day)?')})\.?,?\s+)?`;
 
     const ISO = R`(?<![\d./-])(?<iso>\d{4}[-/.]\d{1,2}[-/.]\d{1,2})(?!\d)`;
-    const TXT1 = R`(?<![A-Za-z])(?<mon>${MONTH})\s+(?<d1>\d{1,2})${ORD}(?![\d:])(?:,?\s+(?<y1>\d{4})(?![\d:]))?`;
-    const TXT2 = R`(?<![\d:./-])(?<d2>\d{1,2})${ORD}\s+(?:${ci('of')}\s+)?(?<mon2>${MONTH})(?:,?\s+(?<y2>\d{4})(?![\d:]))?`;
+    const TXT1 = R`(?<![A-Za-z])(?<mon>${MONTH})\s+(?<d1>\d{1,2})${ORD('o1')}(?![\d:])(?:,?\s+(?<y1>\d{4})(?![\d:]))?`;
+    const TXT2 = R`(?<![\d:./-])(?<d2>\d{1,2})${ORD('o2')}\s+(?:${ci('of')}\s+)?(?<mon2>${MONTH})(?:,?\s+(?<y2>\d{4})(?![\d:]))?`;
     const NUM = R`(?<![\d./-])(?<n1>\d{1,2})[/.-](?<n2>\d{1,2})[/.-](?<n3>\d{4})(?!\d)`;
     const SEP = R`(?:\s*(?:@|,|[-–]|${ci('at')})\s*|\s+|T(?=\d))`;
 
@@ -243,7 +245,7 @@
         R`(?<date>${WD}(?:${ISO}|${TXT1}|${TXT2}|${NUM}))` +
         R`(?:${SEP}${timePart('A')}(?:${tzPart('A')})?(?![\w:]))?(?![\d:])`;
     const BRANCH_B = R`(?<![\w:./-])${timePart('B')}(?:${tzPart('B')})?(?![\w:])`;
-    const RE = new RegExp(`${BRANCH_A}|${BRANCH_B}`, 'g');
+    const RE = new RegExp(`${BRANCH_A}|${BRANCH_B}`, 'gd');
 
     /* =====================================================================
      *  CONVERSION
@@ -257,18 +259,37 @@
 
     const pad = (n) => String(n).padStart(2, '0');
     const dayDiff = (p, q) => Math.round((Date.UTC(p.y, p.m - 1, p.d) - Date.UTC(q.y, q.m - 1, q.d)) / 864e5);
-    const signed = (n) => (n > 0 ? '+' : '') + n + 'd';
-
-    function fmtDate(y, m, d, withYear) {
-        const wd = WEEKDAYS[new Date(Date.UTC(y, m - 1, d)).getUTCDay()];
-        return `${wd} ${d} ${MONTH_NAMES[m - 1]}${withYear ? ' ' + y : ''}`;
-    }
     const fmtTime = (p, withSeconds) => `${pad(p.h)}:${pad(p.mi)}${withSeconds ? ':' + pad(p.s) : ''}`;
-    const withOriginal = (text, original) =>
-        CONFIG.keepOriginal ? `${text} ${CONFIG.originalWrap[0]}${original}${CONFIG.originalWrap[1]}` : text;
+
+    /* ---- helpers that re-write a date in the SAME style as the original ---- */
+    function matchCase(orig, text) {
+        const letters = orig.replace(/[^A-Za-z]/g, '');
+        if (letters.length > 1 && letters === letters.toUpperCase()) return text.toUpperCase();
+        if (letters === letters.toLowerCase()) return text.toLowerCase();
+        return text;
+    }
+    function renderMonth(orig, idx) {
+        const dot = orig.endsWith('.') ? '.' : '';
+        const word = orig.replace(/\.$/, '');
+        const isFull = FULL_MONTHS.some(n => n.toLowerCase() === word.toLowerCase());
+        const full = FULL_MONTHS[idx];
+        const text = isFull ? full : (word.toLowerCase() === 'sept' && idx === 8 ? 'Sept' : full.slice(0, 3));
+        return matchCase(word, text) + dot;
+    }
+    function renderWeekday(orig, dow) {
+        const isFull = FULL_WEEKDAYS.some(n => n.toLowerCase() === orig.toLowerCase());
+        const full = FULL_WEEKDAYS[dow];
+        return matchCase(orig, isFull ? full : full.slice(0, 3));
+    }
+    function renderOrdinal(orig, n) {
+        if (!orig) return '';
+        const suffix = (n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th');
+        return matchCase(orig, suffix);
+    }
+    const num = (n, zeroPad) => (zeroPad ? pad(n) : String(n));
 
     function extractDate(g) {
-        let y = null, mo, d, ambiguous = false;
+        let y = null, mo, d, order = null, ambiguous = false;
         if (g.iso) {
             const [a, b, c] = g.iso.split(/[-/.]/).map(Number);
             y = a; mo = b - 1; d = c;
@@ -281,17 +302,15 @@
         } else if (g.n1) {
             const a = +g.n1, b = +g.n2;
             y = +g.n3;
-            if (a > 12) { d = a; mo = b - 1; }
-            else if (b > 12) { mo = a - 1; d = b; }
-            else {
-                ambiguous = a !== b;
-                if (CONFIG.numericDateOrder === 'MDY') { mo = a - 1; d = b; } else { d = a; mo = b - 1; }
-            }
+            if (a > 12) order = 'DMY';
+            else if (b > 12) order = 'MDY';
+            else order = CONFIG.numericDateOrder === 'MDY' ? 'MDY' : 'DMY';
+            if (order === 'DMY') { d = a; mo = b - 1; } else { mo = a - 1; d = b; }
         } else return null;
 
         const probe = new Date(Date.UTC(y === null ? 2000 : y, mo, d));
         if (!(mo >= 0 && mo <= 11) || probe.getUTCMonth() !== mo || probe.getUTCDate() !== d) return null;
-        return { y, mo, d, ambiguous };
+        return { y, mo, d, order };
     }
 
     function parseTok(tok) {
@@ -313,32 +332,25 @@
     }
     const minutesOf = (t) => (to24(t) ?? 99) * 60 + t.m;
 
-    function convertDateOnly(m, di) {
-        if (!CONFIG.convertDateOnly || di.ambiguous) return null;
-        const y = di.y ?? zoneParts(PL, Date.now()).y;
-        const out = fmtDate(y, di.mo + 1, di.d, di.y !== null);
-        if (out === m[0] || out.slice(4) === m[0]) return null;   // already looks like that
-        return withOriginal(out, m[0]);
-    }
-
-    /** One regex match -> replacement string, or null to leave the text alone. */
+    /** One regex match -> replacement string (original + converted in brackets), or null. */
     function convertMatch(m) {
         const g = m.groups;
         const sfx = g.date !== undefined ? 'A' : 'B';
-        const startTok = g['s1' + sfx] || g['sb' + sfx];
+        const startName = g['s1' + sfx] ? 's1' + sfx : 'sb' + sfx;
+        const startTok = g[startName];
         const endTok = g['e' + sfx];
         const tzTok = g['z' + sfx] || g['zp' + sfx];
 
         let di = null;
         if (sfx === 'A') {
+            if (!startTok) return null;                 // a date on its own is never touched
             di = extractDate(g);
             if (!di) return null;
-            if (!startTok) return convertDateOnly(m, di);
         } else if (!CONFIG.convertTimeOnly) return null;
 
         const a = parseTok(startTok);
         const b = endTok ? parseTok(endTok) : null;
-        if (!a || (endTok && !b) || (g['sb' + sfx] && !b)) return null;
+        if (!a || (endTok && !b) || (startName === 'sb' + sfx && !b)) return null;
 
         // Ranges like "3-5 PM" / "11 - 1 PM": the am/pm of one side applies to the other.
         if (b) {
@@ -362,38 +374,80 @@
         let y, mo, d;
         if (di) {
             y = di.y ?? zoneParts(spec, Date.now()).y; mo = di.mo; d = di.d;
-            const probe = new Date(Date.UTC(y, mo, d));
-            if (probe.getUTCMonth() !== mo) return null;          // e.g. Feb 29 in a non-leap year
+            if (new Date(Date.UTC(y, mo, d)).getUTCMonth() !== mo) return null;   // Feb 29 in a non-leap year
         } else {
             const t = zoneParts(spec, Date.now());
             y = t.y; mo = t.m - 1; d = t.d;
         }
 
         const startTs = wallToUtc(spec, y, mo, d, h1, a.m, a.s || 0);
-        const converted = offsetMin(spec, startTs) !== offsetMin(PL, startTs);
-        if (!converted && !hasAP) return null;                    // already Polish time in 24h
+        const isConverted = offsetMin(spec, startTs) !== offsetMin(PL, startTs);
+        if (!isConverted && !hasAP) return null;                  // already Polish time in 24h
 
         const p1 = zoneParts(PL, startTs);
-        let text = fmtTime(p1, a.s !== null);
 
+        // Build the converted copy by editing pieces of the original text in place.
+        const idx = (name) => {
+            const r = m.indices.groups[name];
+            return r ? [r[0] - m.index, r[1] - m.index] : null;
+        };
+        const edits = [];
+        const put = (name, text, endName) => {
+            const r = idx(name), r2 = endName ? idx(endName) : r;
+            if (r && r2) edits.push({ start: r[0], end: r2[1], text });
+        };
+
+        put(startName, fmtTime(p1, a.s !== null));
+        let endDiff = 0;
         if (b) {
             let endTs = wallToUtc(spec, y, mo, d, h2, b.m, b.s || 0);
             if (endTs <= startTs) endTs += 864e5;                 // e.g. 11 PM - 1 AM
             const p2 = zoneParts(PL, endTs);
-            const endDiff = dayDiff(p2, p1);
-            text += ' – ' + fmtTime(p2, b.s !== null) + (endDiff ? ' ' + signed(endDiff) : '');
+            endDiff = dayDiff(p2, p1);
+            put('e' + sfx, fmtTime(p2, b.s !== null));
         }
+        put('tzf' + sfx, '');                                     // the old zone name is dropped
 
+        let shift = 0;
         if (di) {
-            const showYear = di.y !== null || p1.y !== zoneParts(PL, Date.now()).y;
-            text = fmtDate(p1.y, p1.m, p1.d, showYear) + ', ' + text;
-        } else {
-            const shift = dayDiff(p1, { y, m: mo + 1, d });
-            if (shift) text += ' ' + signed(shift);
+            shift = dayDiff(p1, { y, m: mo + 1, d });
+            if (shift) {                                          // date moved: re-write it in the same style
+                const dow = new Date(Date.UTC(p1.y, p1.m - 1, p1.d)).getUTCDay();
+                if (g.wd) put('wd', renderWeekday(g.wd, dow));
+                if (g.iso) {
+                    const t = g.iso.match(/^(\d{4})([-/.])(\d{1,2})([-/.])(\d{1,2})$/);
+                    const z = /^0/.test(t[3]) || /^0/.test(t[5]);
+                    put('iso', `${p1.y}${t[2]}${num(p1.m, z)}${t[4]}${num(p1.d, z)}`);
+                } else if (g.mon) {
+                    put('mon', renderMonth(g.mon, p1.m - 1));
+                    put('d1', num(p1.d, false) + renderOrdinal(g.o1, p1.d), 'o1');
+                    if (g.y1) put('y1', String(p1.y));
+                } else if (g.mon2) {
+                    put('mon2', renderMonth(g.mon2, p1.m - 1));
+                    put('d2', num(p1.d, false) + renderOrdinal(g.o2, p1.d), 'o2');
+                    if (g.y2) put('y2', String(p1.y));
+                } else if (g.n1) {
+                    const z = /^0/.test(g.n1) || /^0/.test(g.n2);
+                    const [first, second] = di.order === 'DMY' ? [p1.d, p1.m] : [p1.m, p1.d];
+                    put('n1', num(first, z)); put('n2', num(second, z)); put('n3', String(p1.y));
+                }
+            }
+        } else if (CONFIG.showDayShift) {
+            shift = dayDiff(p1, { y, m: mo + 1, d });
         }
-        if (converted) text += ' ' + CONFIG.label;
 
-        return withOriginal(text, m[0]);
+        let text = m[0];
+        for (const e of edits.sort((x, y2) => y2.start - x.start)) {
+            text = text.slice(0, e.start) + e.text + text.slice(e.end);
+        }
+        text = text.trimEnd();
+        if (!di && CONFIG.showDayShift && (shift || endDiff)) {
+            const f = (n) => (n > 0 ? '+' : '') + n + 'd';
+            text += ' ' + f(shift || endDiff);
+        }
+        if (CONFIG.showLabel) text += ' ' + CONFIG.label;
+
+        return `${m[0]} ${CONFIG.wrap[0]}${text}${CONFIG.wrap[1]}`;
     }
 
     function convertText(value) {
