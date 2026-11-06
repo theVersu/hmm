@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Price Converter to PLN
 // @namespace    https://github.com/theVersu/hmm
-// @version      1.0.0
+// @version      1.1.0
 // @description  Shows prices converted to Polish zloty (PLN) next to the original price. Any currency (symbol or code), enabled per website, live exchange rates.
 // @author       Claude
 // @license      MIT
@@ -48,18 +48,27 @@
   const NOT_CODES = new Set(['ALL', 'TOP', 'TRY', 'MAD', 'GEL', 'PEN', 'SOS', 'BTN', 'CUP']);
   const SKIP = new Set(['script', 'style', 'noscript', 'textarea', 'select', 'option', 'svg', 'math', 'canvas',
     'iframe', 'template', 'head', 'title', 'code', 'pre', 'input']);
-  // Class names that usually mark a crossed-out "old" price.
-  const OLD = /(^|[^a-z])(old|orig|original|strike|strikethrough|crossed|through)([^a-z]|$)/i;
+  // Websites that already show their own PLN price: the converted price goes on its own line UNDER the original price
+  // (zero width, so it can never push the site's own layout around) instead of beside it.
+  const BELOW_SITES = ['denpasoft.com'];
 
-  const CSS = `[${ATTR}]{display:inline-block;margin-left:.4em;font:inherit;font-size:.85em;font-weight:400;font-style:normal;` +
-    `letter-spacing:0;white-space:nowrap;color:#2e9d5f;text-decoration:none;cursor:help}` +
-    `[${ATTR}=old]{text-decoration:line-through;opacity:.6}`;
+  // Badge look. The attribute holds tokens: old (crossed-out price), dark/light (page theme), below, fit (compact).
+  const A = `[${ATTR}`;
+  const CSS =
+    `${A}]{display:inline-block;margin-left:.4em;padding:0 .4em;border-radius:4px;font:inherit;font-size:clamp(12px,.85em,15px);` +
+    `font-weight:600;font-style:normal;line-height:1.4;letter-spacing:0;white-space:nowrap;text-decoration:none;cursor:help}` +
+    `${A}~=dark]{color:#7ef0ad;background:rgba(80,220,140,.14)}` +
+    `${A}~=light]{color:#0b6b36;background:rgba(20,140,70,.12)}` +
+    `${A}~=old]{text-decoration:line-through;opacity:.65}` +
+    `${A}~=below]{display:block;width:0;margin:.15em 0 0;padding:0;background:none;font-size:clamp(11px,.75em,13px)}` +
+    `${A}~=fit]{margin-left:0;padding:0;background:none;font-size:11px}`;
 
   /* ─────────────────────────── State ─────────────────────────── */
 
   const host = location.hostname.replace(/^www\./, '').toLowerCase();
   let sites = [...GM_getValue('sites', DEFAULT_SITES)];
   const covers = s => host === s || host.endsWith('.' + s);
+  const below = BELOW_SITES.some(covers);
   const isOn = () => sites.some(covers);
   const saveSites = () => { sites = [...new Set(sites)].sort(); GM_setValue('sites', sites); };
 
@@ -139,32 +148,60 @@
     return pln > 0 && isFinite(pln) ? { code, rate, pln } : null;
   }
 
+  // Is the text inside `el` really drawn with a line through it? Decorations propagate down the tree,
+  // but not into inline-blocks, floats or absolutely positioned boxes, so the walk stops at those.
   function crossed(el) {
-    for (let i = 0; el && i < 6; i++, el = el.parentElement) {
-      if (/^(S|DEL|STRIKE)$/.test(el.tagName)) return true;
-      if (i < 2 && OLD.test(typeof el.className === 'string' ? el.className : '')) return true;
-      if (getComputedStyle(el).textDecorationLine.includes('line-through')) return true;
+    for (let i = 0; el && i < 10; i++, el = el.parentElement) {
+      const cs = getComputedStyle(el);
+      if (cs.textDecorationLine.includes('line-through')) return true;
+      if (cs.display.startsWith('inline-') || cs.cssFloat !== 'none' || /^(absolute|fixed)$/.test(cs.position)) return false;
     }
     return false;
   }
 
-  function badge(c, old) {
+  // Style tokens for a badge placed next to text inside `el`: crossed-out? dark or light page? own line?
+  function tokens(el) {
+    const [r, g, b] = (getComputedStyle(el).color.match(/[\d.]+/g) || []).map(Number);
+    const lightText = !(0.299 * r + 0.587 * g + 0.114 * b < 140);   // unknown -> assume light text on a dark page
+    return `${crossed(el) ? 'old ' : ''}${lightText ? 'dark' : 'light'}${below ? ' below' : ''}`;
+  }
+
+  const fresh = [];                                     // badges added since the last fit() pass
+
+  function badge(c, tok) {
     const b = document.createElement('span');
-    b.setAttribute(ATTR, old ? 'old' : '');
+    b.setAttribute(ATTR, tok);
     b.textContent = '≈ ' + fmt.format(c.pln);
     b.title = `1 ${c.code} = ${c.rate.toPrecision(5)} PLN (${rates.src}, ${rates.date})`;
+    fresh.push(b);
     return b;
+  }
+
+  // Badge sticks out of its box (fixed-width price tags, narrow cards)? -> compact version: no "≈", smaller, no padding.
+  function fit() {
+    const over = fresh.splice(0).filter(b => {          // read phase first, writes after: one layout pass
+      if (!b.isConnected || b.getAttribute(ATTR).includes('below')) return false;
+      let a = b.parentElement;
+      while (a && a !== document.body && getComputedStyle(a).display === 'inline') a = a.parentElement;
+      return a && b.getBoundingClientRect().right > a.getBoundingClientRect().right + 1;
+    });
+    for (const b of over) {
+      b.setAttribute(ATTR, b.getAttribute(ATTR) + ' fit');
+      b.textContent = b.textContent.replace('≈ ', '');
+    }
   }
 
   // Price fully inside one text node (possibly several prices).
   function inject(node, hits) {
-    const old = crossed(node.parentElement);
+    const el = node.parentElement;
+    if (!el) return;
+    const tok = tokens(el);
     done.add(node);
     for (let i = hits.length - 1; i >= 0; i--) {          // back to front so indexes stay valid
       const { m, c } = hits[i], end = m.index + m[0].length;
       let ref = node.nextSibling;
       if (end < node.length) { ref = node.splitText(end); done.add(ref); }
-      node.parentNode.insertBefore(badge(c, old), ref);
+      node.parentNode.insertBefore(badge(c, tok), ref);
     }
   }
 
@@ -180,7 +217,7 @@
         done.add(el); done.add(node);
         const c = convert(m.groups);
         if (c) {
-          const b = badge(c, crossed(el));
+          const b = badge(c, tokens(el));
           /^inline/.test(getComputedStyle(el).display) ? el.after(b) : el.append(b);
         }
         return;
@@ -201,7 +238,9 @@
     }
   }
 
-  function scan(root) {
+  function scan(root) { walk(root); fit(); }
+
+  function walk(root) {
     if (root.nodeType === 3) return handleText(root);
     if (root.nodeType !== 1 || SKIP.has(root.localName) || root.hasAttribute(ATTR)) return;
     const w = document.createTreeWalker(root, 5, {            // 5 = elements + text
