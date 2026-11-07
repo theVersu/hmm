@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         RJ Code Hub – asmr.one / DLsite / JapaneseASMR
 // @namespace    Violentmonkey Scripts
-// @version      1.0.1
-// @description  Jump between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
+// @version      1.1.0
+// @description  Jump (same tab) between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, with a live check whether the work exists on the target site, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
 // @author       Claude
 // @match        *://asmr.one/*
 // @match        *://*.asmr.one/*
@@ -12,7 +12,13 @@
 // @match        https://dlsite.com/*
 // @run-at       document-end
 // @noframes
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM.xmlHttpRequest
+// @grant        unsafeWindow
+// @connect      asmr.one
+// @connect      asmr-200.com
+// @connect      dlsite.com
+// @connect      japaneseasmr.com
 // @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/rj-code-hub.user.js
 // @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/rj-code-hub.user.js
 // ==/UserScript==
@@ -34,6 +40,15 @@
     // 'auto' = mobile UI on touch devices, desktop UI otherwise.
     // Force one with 'desktop' or 'mobile'.
     uiMode: 'auto',
+    // Check whether the current work exists on the other sites and show a
+    // green check / red cross in front of each button.
+    checkAvailability: true,
+    // How long to remember a result (minutes) before checking again
+    cacheMinutes: { yes: 360, no: 30, unknown: 2 },
+    // asmr.one API hosts to try, in order (used only for the availability check)
+    asmrApiHosts: ['api.asmr-200.com', 'api.asmr.one'],
+    // Log every availability decision to the browser console
+    debug: false,
   };
 
   /* ------------------------------------------------------------------ *
@@ -57,18 +72,18 @@
 
   const TARGETS = {
     asmr: {
-      label: 'Find it on ASMR.one',
+      name: 'ASMR.one',
       color: '#c2188b',
       url: (c) => `https://asmr.one/work/${c}`,
     },
     dlsite: {
-      label: 'Find it on DLsite',
+      name: 'DLsite',
       color: '#043c95',
       url: (c) =>
         `https://www.dlsite.com/${DLSITE_SECTION[c.slice(0, 2)] || 'maniax'}/work/=/product_id/${c}.html`,
     },
     jasmr: {
-      label: 'Find it on japaneseasmr.com',
+      name: 'japaneseasmr.com',
       color: '#111111',
       url: (c) => `https://japaneseasmr.com/?s=${c}`,
     },
@@ -108,6 +123,160 @@
     return u.href;
   }
 
+  /* ------------------------------------------------------------------ *
+   *  AVAILABILITY CHECKS  (is this work on the target site?)
+   *  state: 'checking' | 'yes' | 'no' | 'unknown'
+   *  Requests go through GM_xmlhttpRequest (needed for cross-site reads).
+   * ------------------------------------------------------------------ */
+  const gmXhr =
+    typeof GM_xmlhttpRequest === 'function' ? GM_xmlhttpRequest
+    : typeof GM !== 'undefined' && GM.xmlHttpRequest ? GM.xmlHttpRequest.bind(GM)
+    : null;
+
+  function log() { if (CONFIG.debug) console.log('[RJ Code Hub]', ...arguments); }
+
+  function request(url) {
+    return new Promise((resolve, reject) => {
+      if (!gmXhr) return reject(new Error('GM_xmlhttpRequest unavailable'));
+      gmXhr({
+        method: 'GET', url, timeout: 15000,
+        onload: (r) => resolve(r),
+        onerror: () => reject(new Error('network error')),
+        ontimeout: () => reject(new Error('timeout')),
+        onabort: () => reject(new Error('aborted')),
+      });
+    });
+  }
+
+  const CHECKERS = {
+    // asmr.one has no per-work HTML (it is an SPA), so ask its API.
+    // RJ01722913 -> id 1722913 (leading zeros dropped). BJ/VJ use special ids -> can't check.
+    async asmr(code) {
+      const m = code.match(/^([A-Z]+)(\d+)$/);
+      if (!m || m[1] !== 'RJ') return { state: 'unknown' };
+      const id = String(parseInt(m[2], 10));
+      for (const host of CONFIG.asmrApiHosts) {
+        let verdict = null;
+        for (const path of ['workInfo', 'work']) {
+          try {
+            const r = await request(`https://${host}/api/${path}/${id}`);
+            log('asmr', host, path, r.status);
+            if (r.status === 200) {
+              try {
+                const j = JSON.parse(r.responseText);
+                if (j && !j.error && (j.id || j.source_id || j.title)) return { state: 'yes' };
+              } catch (e) { /* not JSON */ }
+              verdict = verdict || 'err';
+            } else if (r.status === 404 || r.status === 400) verdict = 'no';
+            else verdict = verdict || 'err';
+          } catch (e) { verdict = verdict || 'err'; }
+        }
+        if (verdict === 'no') return { state: 'no' };
+      }
+      return { state: 'unknown' };
+    },
+
+    // DLsite: the product page itself (404 / redirected away = not there)
+    async dlsite(code) {
+      const url = TARGETS.dlsite.url(code);
+      const r = await request(url);
+      log('dlsite', r.status, r.finalUrl);
+      if (r.status === 404 || r.status === 410) return { state: 'no' };
+      if (r.status === 200) {
+        return (r.finalUrl || url).toUpperCase().includes(code) ? { state: 'yes' } : { state: 'no' };
+      }
+      return { state: 'unknown' };
+    },
+
+    // japaneseasmr.com: search for the code, read the matching entry's link
+    async jasmr(code) {
+      const searchUrl = TARGETS.jasmr.url(code);
+      const r = await request(searchUrl);
+      log('jasmr', r.status);
+      if (r.status !== 200) return { state: 'unknown' }; // Cloudflare / error pages land here
+      const html = r.responseText || '';
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      for (const el of doc.querySelectorAll('.site-archive-post, article')) {
+        if (!el.innerHTML.toUpperCase().includes(code)) continue; // title text or image name holds the code
+        const a = el.querySelector('.entry-title a[href], h2 a[href], a[href]');
+        if (a) return { state: 'yes', url: new URL(a.getAttribute('href'), searchUrl).href };
+      }
+      // A real results page without a match = not on the site; anything else = can't tell
+      return /Search Results for|Nothing Found/i.test(html) ? { state: 'no' } : { state: 'unknown' };
+    },
+  };
+
+  const avail = new Map(); // "target:CODE" -> { state, url, t }
+
+  function storageKey(t, code) { return `rjhub:av:${t}:${code}`; }
+
+  function cachedResult(t, code) {
+    const key = t + ':' + code;
+    let e = avail.get(key);
+    if (!e) {
+      try {
+        const raw = JSON.parse(localStorage.getItem(storageKey(t, code)) || 'null');
+        if (raw && raw.s) e = { state: raw.s, url: raw.u, t: raw.t };
+      } catch (err) { /* storage blocked */ }
+    }
+    if (!e) return null;
+    if (e.state === 'checking') return e;
+    const ttl = (CONFIG.cacheMinutes[e.state] || 0) * 60000;
+    if (Date.now() - e.t > ttl) return null;
+    avail.set(key, e);
+    return e;
+  }
+
+  function ensureChecks(code) {
+    for (const t of OFFER[SITE]) {
+      if (cachedResult(t, code)) continue;
+      const key = t + ':' + code;
+      if (!CONFIG.checkAvailability) { avail.set(key, { state: 'unknown', t: Date.now() }); continue; }
+      avail.set(key, { state: 'checking', t: Date.now() });
+      CHECKERS[t](code)
+        .catch((err) => { log(t, 'check failed:', err.message); return { state: 'unknown' }; })
+        .then((res) => {
+          const e = { state: res.state, url: res.url, t: Date.now() };
+          avail.set(key, e);
+          if (e.state === 'yes' || e.state === 'no') {
+            try { localStorage.setItem(storageKey(t, code), JSON.stringify({ s: e.state, u: e.url, t: e.t })); } catch (err) {}
+          }
+          log(t, code, '->', e.state, e.url || '');
+          refresh();
+        });
+    }
+  }
+
+  const STATE_TIP = {
+    checking: 'Checking…',
+    yes: 'Found on',
+    no: 'Not found on',
+    unknown: "Couldn't verify on",
+  };
+
+  /* Icon + text for a button. Used by both UIs. */
+  const ICON_GLYPH = { yes: '✓', no: '✕', checking: '…', unknown: '?' };
+  const ICON_CSS = `
+    .ico{display:inline-flex; align-items:center; justify-content:center; flex:none;
+      width:18px; height:18px; margin-right:8px; border-radius:50%; box-sizing:border-box;
+      border:1.5px solid #fff; color:#fff; font-size:11px; font-weight:700; line-height:1;
+      vertical-align:-4px}
+    .ico.yes{background:#1faa59}
+    .ico.no{background:#e5322d}
+    .ico.checking,.ico.unknown{background:#8a8f98}`;
+
+  function fillButton(el, it) {
+    el.style.setProperty('--c', it.color);
+    if (it.state) {
+      const ic = document.createElement('span');
+      ic.className = 'ico ' + it.state;
+      ic.textContent = ICON_GLYPH[it.state];
+      el.appendChild(ic);
+    }
+    el.appendChild(document.createTextNode(it.label));
+    if (it.title) el.title = it.title;
+  }
+
   /* Build the list of buttons. Order = most prominent first. */
   function buildItems(code) {
     const items = [];
@@ -117,16 +286,24 @@
         id: 'toggle',
         label: www ? 'Go to asmr.one' : 'Go to www.asmr.one',
         href: toggleWwwUrl(),
-        newTab: false,
         color: '#007bff',
       });
     }
     if (code) {
       for (const id of OFFER[SITE]) {
-        items.push({ id, label: TARGETS[id].label, href: TARGETS[id].url(code), newTab: true, color: TARGETS[id].color });
+        const T = TARGETS[id];
+        const a = cachedResult(id, code) || { state: 'checking' };
+        items.push({
+          id,
+          label: 'on ' + T.name,
+          href: a.url || T.url(code), // japaneseasmr: direct entry link once found
+          color: T.color,
+          state: a.state,
+          title: `${STATE_TIP[a.state]} ${T.name}`.replace(/Checking… .*/, 'Checking…'),
+        });
       }
     } else if (CONFIG.showNotFound && SITE !== 'asmr') {
-      items.push({ id: 'none', label: 'RJ code not found', href: null, newTab: false, color: '#555555' });
+      items.push({ id: 'none', label: 'RJ code not found', href: null, color: '#555555' });
     }
     return items;
   }
@@ -152,6 +329,7 @@
       const root = hostEl.attachShadow({ mode: 'closed' }); // isolate from site CSS
       root.innerHTML = `
         <style>
+          ${ICON_CSS}
           .bar{
             position:fixed; z-index:2147483646;
             display:flex; flex-direction:column; align-items:flex-end; gap:8px;
@@ -189,11 +367,9 @@
       for (const it of items) {
         const el = document.createElement(it.href ? 'a' : 'span');
         el.className = 'btn' + (it.href ? '' : ' off');
-        el.style.setProperty('--c', it.color);
-        el.textContent = it.label;
+        fillButton(el, it);
         if (it.href) {
           el.href = it.href;
-          if (it.newTab) { el.target = '_blank'; el.rel = 'noopener noreferrer'; }
         }
         barEl.appendChild(el);
       }
@@ -254,6 +430,7 @@
       const root = hostEl.attachShadow({ mode: 'closed' });
       root.innerHTML = `
         <style>
+          ${ICON_CSS}
           *{box-sizing:border-box}
           .dock{
             position:fixed; z-index:2147483646; width:${SIZE}px; height:${SIZE}px; display:none;
@@ -353,11 +530,9 @@
       for (const it of items) {
         const el = document.createElement(it.href ? 'a' : 'span');
         el.className = 'btn' + (it.href ? '' : ' off');
-        el.style.setProperty('--c', it.color);
-        el.textContent = it.label;
+        fillButton(el, it);
         if (it.href) {
           el.href = it.href;
-          if (it.newTab) { el.target = '_blank'; el.rel = 'noopener noreferrer'; }
           el.addEventListener('click', () => setOpen(false));
         }
         menuEl.appendChild(el);
@@ -396,8 +571,9 @@
 
   function refresh() {
     const code = findCode();
+    if (code) ensureChecks(code);
     const items = buildItems(code);
-    const sig = JSON.stringify(items.map((i) => [i.id, i.label, i.href]));
+    const sig = JSON.stringify(items.map((i) => [i.id, i.label, i.href, i.state]));
     if (sig !== lastSig) {
       lastSig = sig;
       lastItems = items;
@@ -424,14 +600,19 @@
   }
 
   ['popstate', 'hashchange'].forEach((ev) => window.addEventListener(ev, onUrlMaybeChanged));
-  ['pushState', 'replaceState'].forEach((fn) => {
-    const orig = history[fn];
-    history[fn] = function () {
-      const r = orig.apply(this, arguments);
-      setTimeout(onUrlMaybeChanged, 0);
-      return r;
-    };
-  });
+  // Hook SPA navigation (asmr.one). With @grant the script is sandboxed, so patch the page's own
+  // history object; if the browser refuses, the polling below still catches every URL change.
+  try {
+    const pageHistory = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).history;
+    ['pushState', 'replaceState'].forEach((fn) => {
+      const orig = pageHistory[fn];
+      pageHistory[fn] = function () {
+        const r = orig.apply(this, arguments);
+        setTimeout(onUrlMaybeChanged, 0);
+        return r;
+      };
+    });
+  } catch (e) { /* polling fallback */ }
   setInterval(onUrlMaybeChanged, CONFIG.urlPollMs); // fallback for anything missed
 
   applyUI();
