@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RJ Code Hub – asmr.one / DLsite / JapaneseASMR
 // @namespace    Violentmonkey Scripts
-// @version      1.3.0
+// @version      1.4.0
 // @description  Jump (same tab) between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, with a live check whether the work exists on the target site, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
 // @author       Claude
 // @match        *://asmr.one/*
@@ -10,6 +10,8 @@
 // @match        https://www.japaneseasmr.com/*
 // @match        https://www.dlsite.com/*
 // @match        https://dlsite.com/*
+// @match        https://hentaiasmr.moe/*
+// @match        https://www.hentaiasmr.moe/*
 // @run-at       document-end
 // @noframes
 // @grant        GM_xmlhttpRequest
@@ -25,6 +27,7 @@
 // @connect      asmr-300.com
 // @connect      dlsite.com
 // @connect      japaneseasmr.com
+// @connect      hentaiasmr.moe
 // @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/rj-code-hub.user.js
 // @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/rj-code-hub.user.js
 // ==/UserScript==
@@ -53,10 +56,10 @@
     cacheMinutes: { yes: 360, no: 30, unknown: 2 },
     // asmr.one API hosts to try, in order (used only for the availability check)
     asmrApiHosts: ['api.asmr-200.com', 'api.asmr.one', 'api.asmr-100.com', 'api.asmr-300.com'],
-    // japaneseasmr.com blocks scripted requests (Cloudflare, HTTP 403). When that happens the script
+    // japaneseasmr.com / hentaiasmr.moe may block scripted requests (Cloudflare, HTTP 403). When that happens the script
     // briefly opens the search in a real background tab (a normal visit, so Cloudflare lets it
     // through), reads the result there, and closes the tab again. Set to false to disable.
-    jasmrBackgroundTab: true,
+    backgroundTab: true,
     // Log every availability decision to the browser console
     debug: false,
   };
@@ -68,6 +71,7 @@
     'asmr.one': 'asmr',
     'dlsite.com': 'dlsite',
     'japaneseasmr.com': 'jasmr',
+    'hentaiasmr.moe': 'hasmr',
   }[location.hostname.replace(/^www\./, '').toLowerCase()];
 
   if (!SITE || window.top !== window.self) return;
@@ -84,6 +88,7 @@
   // the button falls back to a plain text name automatically.
   const LOGO_DLSITE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAFkAAAAZCAMAAABtjXLxAAAAAXNSR0IB2cksfwAAAAlwSFlzAAALEwAACxMBAJqcGAAAAJxQTFRFBSqDBSqDBSqDBSqDBSqDAAAABSqD/MgA/MgA/MgA/MgABSqDBSqDBSqD/MgABSqDBSqD/MgABSqDBSqD/MgA/MgABSqDBSqDBSqDBSqD/MgA/MgA/MgABSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDBSqDhRFJ5wAAADR0Uk5T/+zBgykAMEmvtmTg8Tz/mQjGxQ/QgyIX5kPnmgpYoMzZtXwCG7ywa6hgkNH8eIn2pDRO1A+MtTIAAAK3SURBVHicldR7V9owFADwW6DgaAuzCofNWUSnE63Dyff/CHs46LaDiqicyc5BGQgehkCXm6SYYOojf9y+kl8evYkGtGhYgBdthFGHsBIhde/INU5a+KOwWprQwBg+S44kSBgTOtEHMP89QwZIa4NnyNE4hv6LZLC13tNyDL/Euy+TwZ4OnpT1GAmJv1xOgnb9iBw1X7XYc/r2EXn5Njoh31/r5I//YTIpkSj7alia1s5oWr8jyHHfGV3TNQZrGCbntSOArVNYWCQPfmtOdmJdPjjYHp8JMkAqdYq3m40QeTGCLYn8/ie57hzJspGtCQuRa4syGGnsCrIdpWyseBAuG5kjsbJ71RZlWLjB+KGulLcroJRNyDQBit9ZrdKkSq9msiPKsNIgYd9TyU4dq7gX69U5mVbztxEsVZc6TurqHN8UmpK8+41OTiW7XzEe4MAVcrKLq6szhX6HT5K8+QP5mkqm1fe92W0g053CJnRQ4XVpPzuS/OY8dMyrdRKKx2rZH5NQ/m3zug3M37Ikb3mh60ynw0Y1k5daXF6+JCG98UVaPlGmXYfkBp2OIONejQ+4vIfmx5gkS1m38QtjTFPJa5iv1nAmO5eCTBtsWpJs3stOY4K39o1qD6beHdJO1bKRJ19d3RNbTGfyokE3N874oexYmI9ucyDJNP1pbwXc2uwIJmtT9e9XYw+GfHcWmsFZV+TqMbgT/TOfjiTT9C93z/gvhDW7ew52u+hlOvDgfM7514EcFJ3lBSmrLVmmPw5Kla0TNmiyNvmBSXZjbtqZl9k2CpFxOpLs0NOSLPMIUlZDGuBdT5bLh/RRLe+2enMy+BOfy5BPiP9v/UIac6lqscNfKRd6HBZkyEdqXAbDmVaDEb/FvA9kIxtvB00fyrmUWZm9EGSSL/Vx4ZTVt7Nesu+2rQiD/gMV1CpNv7aqOAAAAABJRU5ErkJggg==';
   const LOGO_JASMR = 'data:image/png;base64,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';
+  const LOGO_HASMR = 'data:image/png;base64,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';
 
   const TARGETS = {
     asmr: {
@@ -106,13 +111,20 @@
       color: '#111111',
       url: (c) => `https://japaneseasmr.com/?s=${c}`,
     },
+    hasmr: {
+      name: 'hentaiasmr.moe',
+      logo: LOGO_HASMR,
+      color: '#d32f2f',
+      url: (c) => `https://hentaiasmr.moe/${c.toLowerCase()}.html`, // e.g. /rj01727485.html
+    },
   };
 
   // Which targets to offer on each site (first = most prominent)
   const OFFER = {
-    asmr: ['jasmr', 'dlsite'],
-    dlsite: ['asmr', 'jasmr'],
-    jasmr: ['asmr', 'dlsite'],
+    asmr: ['jasmr', 'hasmr', 'dlsite'],
+    dlsite: ['asmr', 'jasmr', 'hasmr'],
+    jasmr: ['asmr', 'dlsite', 'hasmr'],
+    hasmr: ['asmr', 'dlsite', 'jasmr'],
   };
 
   /* ------------------------------------------------------------------ *
@@ -124,6 +136,8 @@
       m = location.href.match(new RegExp(`/work/(${CODE})`, 'i'));
     } else if (SITE === 'dlsite') {
       m = location.href.match(new RegExp(`/product_id/(${CODE})`, 'i'));
+    } else if (SITE === 'hasmr') {
+      m = location.pathname.match(new RegExp(`/(${CODE})\\.html`, 'i')); // /rj01727485.html
     } else if (SITE === 'jasmr') {
       return findCodeJasmr();
     }
@@ -253,14 +267,14 @@
     kv.set(JA_INDEX_KEY, JSON.stringify(idx));
   }
 
-  // --- Real-browser fallback for japaneseasmr.com -------------------------------------------
+  // --- Real-browser fallback for sites that block scripted requests (japaneseasmr.com, hentaiasmr.moe) -------------------------------------------
   // Opener side: open the search in a background tab (marked with #rjhub-bg), wait for the helper
   // running inside that tab to store its verdict in the shared script storage, then close the tab.
   let bgChain = Promise.resolve(); // one background tab at a time
-  function jasmrViaTab(code) {
+  function viaTab(target, code) {
     const run = () => new Promise((resolve) => {
-      if (!CONFIG.jasmrBackgroundTab || typeof GM_openInTab !== 'function') return resolve(null);
-      const key = 'rjhub:jasmr-result:' + code;
+      if (!CONFIG.backgroundTab || typeof GM_openInTab !== 'function') return resolve(null);
+      const key = `rjhub:tab:${target}:${code}`;
       const started = Date.now();
       let tab = null, finished = false, poll = null, to = null, lid = null;
       const finish = (res) => {
@@ -283,7 +297,7 @@
       poll = setInterval(check, 700);
       to = setTimeout(() => finish(null), 30000);
       try {
-        tab = GM_openInTab(TARGETS.jasmr.url(code) + '#rjhub-bg', { active: false, insert: true, setParent: true });
+        tab = GM_openInTab(TARGETS[target].url(code) + '#rjhub-bg', { active: false, insert: true, setParent: true });
       } catch (e) { finish(null); }
     });
     const p = bgChain.then(run, run);
@@ -293,12 +307,12 @@
 
   // Helper side: runs inside that background tab (a normal visit, so Cloudflare lets it through).
   // Reads the results, remembers the entries, reports the verdict, and does nothing else.
-  function runBgHelper() {
+  function runBgHelperJasmr() {
     const q = new URLSearchParams(location.search).get('s') || '';
     const m = q.match(new RegExp(`(${CODE})`, 'i'));
     if (!m) return;
     const C = m[1].toUpperCase();
-    const key = 'rjhub:jasmr-result:' + C;
+    const key = `rjhub:tab:jasmr:${C}`;
     let n = 0;
     const tick = () => {
       if (++n > 60) return; // ~30 s, then give up (the opener times out as well)
@@ -312,6 +326,40 @@
       setTimeout(tick, 500);
     };
     tick();
+  }
+
+  // hentaiasmr.moe helper: the id is in the URL, so "the page loaded and we were not redirected
+  // away or shown a 404" is the verdict.
+  function runBgHelperHasmr() {
+    const m = location.pathname.match(new RegExp(`/(${CODE})\\.html`, 'i'));
+    if (!m) return;
+    const C = m[1].toUpperCase();
+    const key = `rjhub:tab:hasmr:${C}`;
+    const notFound = /\b404\b|not found|doesn.?t exist|no longer available/i;
+    const challenge = /just a moment|attention required|checking your browser/i;
+    let n = 0;
+    const tick = () => {
+      if (++n > 60) return; // ~30 s
+      const title = document.title || '';
+      if (document.readyState === 'complete' && !challenge.test(title)) {
+        const h1 = (document.querySelector('h1') || {}).textContent || '';
+        const head = ((document.body && document.body.innerText) || '').slice(0, 600);
+        let res;
+        if (notFound.test(title + ' ' + h1 + ' ' + head)) res = { state: 'no' };
+        else if (location.pathname.toUpperCase().includes(C)) res = { state: 'yes' };
+        else res = { state: 'no' }; // redirected away
+        res.t = Date.now();
+        kv.set(key, JSON.stringify(res));
+        return;
+      }
+      setTimeout(tick, 500);
+    };
+    tick();
+  }
+
+  function runBgHelper() {
+    if (SITE === 'hasmr') runBgHelperHasmr();
+    else runBgHelperJasmr();
   }
 
   const CHECKERS = {
@@ -353,6 +401,31 @@
         return (r.finalUrl || url).toUpperCase().includes(code) ? { state: 'yes' } : { state: 'no' };
       }
       return { state: 'unknown', why: 'HTTP ' + r.status };
+    },
+
+    // hentaiasmr.moe: the work page itself (the id is in the URL). If the site blocks the scripted
+    // request (Cloudflare challenge / 403), do a real visit in a background tab instead.
+    async hasmr(code) {
+      const url = TARGETS.hasmr.url(code);
+      let r;
+      try { r = await request(url, HTML_HEADERS); } catch (e) { r = { status: 0, responseText: '' }; }
+      log('hasmr', r.status, r.finalUrl);
+      if (r.status === 404 || r.status === 410) return { state: 'no' };
+      const title = ((r.responseText || '').match(/<title[^>]*>([^<]*)/i) || [])[1] || '';
+      const challenged = /just a moment|attention required|checking your browser/i.test(title);
+      if (r.status === 200 && !challenged) {
+        if (/\b404\b|not found/i.test(title)) return { state: 'no' };
+        return (r.finalUrl || url).toUpperCase().includes(code) ? { state: 'yes' } : { state: 'no' };
+      }
+      const blocked = challenged || [403, 429, 503].includes(r.status);
+      if (blocked) {
+        const viaT = await viaTab('hasmr', code);
+        if (viaT) return { state: viaT.state };
+      }
+      return {
+        state: 'unknown',
+        why: `HTTP ${r.status || 'error'}` + (blocked ? ': the site blocks scripted checks' + (CONFIG.backgroundTab ? ' and the background tab gave no answer' : '') : ''),
+      };
     },
 
     // japaneseasmr.com is behind Cloudflare, which often answers scripted requests with HTTP 403.
@@ -408,13 +481,13 @@
       } catch (e) { log('jasmr rest failed', e.message); }
 
       // Still blocked: do a real visit in a background tab and read the result there
-      const viaTab = await jasmrViaTab(code);
-      if (viaTab) return { state: viaTab.state, url: viaTab.url };
+      const viaT = r.status ? await viaTab('jasmr', code) : null;
+      if (viaT) return { state: viaT.state, url: viaT.url };
 
       return {
         state: 'unknown',
         why: `HTTP ${r.status || 'error'}: the site blocks scripted checks` +
-          (CONFIG.jasmrBackgroundTab ? ' and the background tab gave no answer' : ''),
+          (CONFIG.backgroundTab ? ' and the background tab gave no answer' : ''),
       };
     },
   };
@@ -611,6 +684,7 @@
           }
           .asmr{top:60px; right:20px}                                 /* list grows down */
           .jasmr{top:20px; right:20px}                                /* list grows down */
+          .hasmr{top:70px; right:20px}                               /* list grows down (placement is a guess: adjust) */
           .dlsite{bottom:60px; right:20px; flex-direction:column-reverse} /* grows up, first button on the line */
           @media print{.bar{display:none}}
         </style>
@@ -648,7 +722,7 @@
      *  Drag it anywhere (it snaps to the left/right edge and remembers its
      *  height per site), so it never has to cover the site's player bar.
      * ------------------------------------------------------------------ */
-    const DEFAULT_Y = { asmr: 0.62, dlsite: 0.75, jasmr: 0.75 }; // fraction of screen height
+    const DEFAULT_Y = { asmr: 0.62, dlsite: 0.75, jasmr: 0.75, hasmr: 0.75 }; // fraction of screen height
     const SIZE = 44, MARGIN = 10;
     const POS_KEY = 'rjhub:pos:' + SITE;
   
@@ -827,7 +901,7 @@
   else if (coarse.addListener) coarse.addListener(applyUI);
 
   // Background-tab helper mode (see runBgHelper): no UI, no checks, just report back
-  const BG_HELPER = SITE === 'jasmr' && /rjhub-bg/.test(location.hash);
+  const BG_HELPER = (SITE === 'jasmr' || SITE === 'hasmr') && /rjhub-bg/.test(location.hash);
 
   function refresh() {
     if (BG_HELPER) return false;
