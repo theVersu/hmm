@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Price Converter to PLN
 // @namespace    https://github.com/theVersu/hmm
-// @version      1.1.0
+// @version      1.2.0
 // @description  Shows prices converted to Polish zloty (PLN) next to the original price. Any currency (symbol or code), enabled per website, live exchange rates.
 // @author       Claude
 // @license      MIT
@@ -36,6 +36,17 @@
   const RATES_TTL = 6 * 3600e3;
   const ATTR = 'data-pln';
 
+  // Websites that already show their own PLN price: the converted prices go on their own line UNDER the price row.
+  const LINE_SITES = ['denpasoft.com'];
+
+  // Extra CSS for specific websites (only injected there).
+  const SITE_CSS = {
+    // Fixed-width price tags on the list pages: let them grow so the converted price fits at the same size as the price.
+    'mangagamer.com':
+      'html body main a.product>p{width:auto!important;min-width:4rem;white-space:nowrap}' +
+      'html body main a.product>p>span[data-pln]{display:block;width:max-content;margin:.1em auto 0;font-size:1em}',
+  };
+
   // Symbol / text marker -> ISO code. "$" and "¥" are ambiguous, change them here if you need (e.g. '¥': 'CNY').
   const SYMBOLS = {
     '$': 'USD', 'US$': 'USD', 'CA$': 'CAD', 'C$': 'CAD', 'AU$': 'AUD', 'A$': 'AUD', 'NZ$': 'NZD', 'HK$': 'HKD',
@@ -46,36 +57,37 @@
   };
   // ISO codes that are also normal words / abbreviations -> never matched as text codes.
   const NOT_CODES = new Set(['ALL', 'TOP', 'TRY', 'MAD', 'GEL', 'PEN', 'SOS', 'BTN', 'CUP']);
-  const SKIP = new Set(['script', 'style', 'noscript', 'textarea', 'select', 'option', 'svg', 'math', 'canvas',
-    'iframe', 'template', 'head', 'title', 'code', 'pre', 'input']);
-  // Websites that already show their own PLN price: the converted price goes on its own line UNDER the original price
-  // (zero width, so it can never push the site's own layout around) instead of beside it.
-  const BELOW_SITES = ['denpasoft.com'];
+  const SKIP = ['script', 'style', 'noscript', 'textarea', 'select', 'option', 'svg', 'math', 'canvas',
+    'iframe', 'template', 'head', 'title', 'code', 'pre', 'input'];
+  const SKIP_SEL = SKIP.join(',') + `,[${ATTR}]`;
 
-  // Badge look. The attribute holds tokens: old (crossed-out price), dark/light (page theme), below, fit (compact).
-  const A = `[${ATTR}`;
+  // Badge look (same everywhere). The attribute holds tokens: old (crossed-out price), dark/light (page theme).
   const CSS =
-    `${A}]{display:inline-block;margin-left:.4em;padding:0 .4em;border-radius:4px;font:inherit;font-size:clamp(12px,.85em,15px);` +
+    `span[${ATTR}]{display:inline-block;margin-left:.4em;padding:0 .4em;border-radius:4px;font:inherit;font-size:clamp(12px,.85em,15px);` +
     `font-weight:600;font-style:normal;line-height:1.4;letter-spacing:0;white-space:nowrap;text-decoration:none;cursor:help}` +
-    `${A}~=dark]{color:#7ef0ad;background:rgba(80,220,140,.14)}` +
-    `${A}~=light]{color:#0b6b36;background:rgba(20,140,70,.12)}` +
-    `${A}~=old]{text-decoration:line-through;opacity:.65}` +
-    `${A}~=below]{display:block;width:0;margin:.15em 0 0;padding:0;background:none;font-size:clamp(11px,.75em,13px)}` +
-    `${A}~=fit]{margin-left:0;padding:0;background:none;font-size:11px}`;
+    `span[${ATTR}~=dark]{color:#7ef0ad;background:rgba(80,220,140,.14)}` +
+    `span[${ATTR}~=light]{color:#0b6b36;background:rgba(20,140,70,.12)}` +
+    `span[${ATTR}~=old]{text-decoration:line-through;opacity:.65}` +
+    `div[${ATTR}]{display:flex;flex-wrap:wrap;gap:.2em .4em;margin-top:.2em}` +
+    `div[${ATTR}] span[${ATTR}]{margin-left:0}`;
 
   /* ─────────────────────────── State ─────────────────────────── */
 
   const host = location.hostname.replace(/^www\./, '').toLowerCase();
   let sites = [...GM_getValue('sites', DEFAULT_SITES)];
   const covers = s => host === s || host.endsWith('.' + s);
-  const below = BELOW_SITES.some(covers);
   const isOn = () => sites.some(covers);
   const saveSites = () => { sites = [...new Set(sites)].sort(); GM_setValue('sites', sites); };
+  const lineSite = LINE_SITES.some(covers);
 
   let rates = null;                    // { src, date, r: { CODE: PLN per 1 unit } }
   let RE, RE1, ONLY;                   // compiled once rates are known
   let active = false, gen = 0, mo = null, timer = 0, styleEl = null;
   let done = new WeakSet();            // text nodes / elements already handled
+  let lines = new WeakMap();           // price row -> line with converted prices below it
+  const lineRows = new Set();
+  const stacked = new Map();           // price groups we switched to a vertical layout (restored on switch-off)
+  const srcOf = new WeakMap();         // badge in a line -> the price element it belongs to
   const queue = new Set();
   const fmt = new Intl.NumberFormat('pl-PL', { style: 'currency', currency: 'PLN' });
 
@@ -148,6 +160,8 @@
     return pln > 0 && isFinite(pln) ? { code, rate, pln } : null;
   }
 
+  /* ─────────────────────────── Badge look ─────────────────────────── */
+
   // Is the text inside `el` really drawn with a line through it? Decorations propagate down the tree,
   // but not into inline-blocks, floats or absolutely positioned boxes, so the walk stops at those.
   function crossed(el) {
@@ -159,45 +173,82 @@
     return false;
   }
 
-  // Style tokens for a badge placed next to text inside `el`: crossed-out? dark or light page? own line?
-  function tokens(el) {
-    const [r, g, b] = (getComputedStyle(el).color.match(/[\d.]+/g) || []).map(Number);
-    const lightText = !(0.299 * r + 0.587 * g + 0.114 * b < 140);   // unknown -> assume light text on a dark page
-    return `${crossed(el) ? 'old ' : ''}${lightText ? 'dark' : 'light'}${below ? ' below' : ''}`;
+  const lum = c => 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+
+  // Is the area behind this text dark? First visible background up the tree, otherwise guess from the text colour.
+  function darkBehind(el) {
+    for (let a = el, i = 0; a && i < 15; a = a.parentElement, i++) {
+      const m = getComputedStyle(a).backgroundColor.match(/[\d.]+/g);
+      if (m && (m[3] === undefined || +m[3] > 0.5)) return lum(m.map(Number)) < 140;
+    }
+    const t = (getComputedStyle(el).color.match(/[\d.]+/g) || []).map(Number);
+    return !(lum(t) < 140);                                 // light text => dark page; unknown => assume dark page
   }
 
-  const fresh = [];                                     // badges added since the last fit() pass
+  const tokens = el => `${crossed(el) ? 'old ' : ''}${darkBehind(el) ? 'dark' : 'light'}`;
 
   function badge(c, tok) {
     const b = document.createElement('span');
     b.setAttribute(ATTR, tok);
     b.textContent = '≈ ' + fmt.format(c.pln);
     b.title = `1 ${c.code} = ${c.rate.toPrecision(5)} PLN (${rates.src}, ${rates.date})`;
-    fresh.push(b);
     return b;
   }
 
-  // Badge sticks out of its box (fixed-width price tags, narrow cards)? -> compact version: no "≈", smaller, no padding.
-  function fit() {
-    const over = fresh.splice(0).filter(b => {          // read phase first, writes after: one layout pass
-      if (!b.isConnected || b.getAttribute(ATTR).includes('below')) return false;
-      let a = b.parentElement;
-      while (a && a !== document.body && getComputedStyle(a).display === 'inline') a = a.parentElement;
-      return a && b.getBoundingClientRect().right > a.getBoundingClientRect().right + 1;
-    });
-    for (const b of over) {
-      b.setAttribute(ATTR, b.getAttribute(ATTR) + ' fit');
-      b.textContent = b.textContent.replace('≈ ', '');
+  /* ─────────────────────────── Placement ─────────────────────────── */
+
+  // LINE_SITES only: the flex row holding the prices (old / current / the site's own PLN price) of `el`.
+  // Its converted prices get their own line under the row. If the row sits beside other content in a horizontal flex box
+  // (e.g. bundle list), the old/current prices are stacked vertically instead and the badges stay beside each price.
+  function lineRow(el) {
+    if (!lineSite) return null;
+    const row = el.parentElement;
+    if (!row || !/flex/.test(getComputedStyle(row).display)) return null;
+    const p = row.parentElement && getComputedStyle(row.parentElement);
+    if (p && /flex/.test(p.display) && p.flexDirection.startsWith('row')) {
+      if (!stacked.has(row)) {
+        stacked.set(row, [row.style.flexDirection, row.style.alignItems]);
+        row.style.flexDirection = 'column';
+        row.style.alignItems = 'flex-end';
+      }
+      return null;
     }
+    return row;
+  }
+
+  // Drop badges of this price from an earlier pass (the site re-rendered it) and of prices that no longer exist.
+  function purge(row, src) {
+    const line = lines.get(row);
+    if (line) for (const x of [...line.children]) { const s = srcOf.get(x); if (!s || s === src || !s.isConnected) x.remove(); }
+  }
+
+  function addToLine(row, b, src) {
+    let line = lines.get(row);
+    if (!line || !line.isConnected) {
+      line = document.createElement('div');
+      line.setAttribute(ATTR, 'line');
+      row.after(line);
+      lines.set(row, line);
+      lineRows.add(row);
+    }
+    srcOf.set(b, src);
+    // keep document order: old price before current price
+    const next = [...line.children].find(x => src.compareDocumentPosition(srcOf.get(x)) & 4);
+    line.insertBefore(b, next || null);
   }
 
   // Price fully inside one text node (possibly several prices).
   function inject(node, hits) {
     const el = node.parentElement;
     if (!el) return;
-    const tok = tokens(el);
+    const tok = tokens(el), row = lineRow(el);
     done.add(node);
-    for (let i = hits.length - 1; i >= 0; i--) {          // back to front so indexes stay valid
+    if (row) {
+      purge(row, el);
+      for (const { c } of hits) addToLine(row, badge(c, tok), el);
+      return;
+    }
+    for (let i = hits.length - 1; i >= 0; i--) {              // back to front so indexes stay valid
       const { m, c } = hits[i], end = m.index + m[0].length;
       let ref = node.nextSibling;
       if (end < node.length) { ref = node.splitText(end); done.add(ref); }
@@ -217,8 +268,12 @@
         done.add(el); done.add(node);
         const c = convert(m.groups);
         if (c) {
-          const b = badge(c, tokens(el));
-          /^inline/.test(getComputedStyle(el).display) ? el.after(b) : el.append(b);
+          const tok = tokens(el), row = lineRow(el);
+          if (row) { purge(row, el); addToLine(row, badge(c, tok), el); }
+          else {
+            const b = badge(c, tok);
+            /^inline/.test(getComputedStyle(el).display) ? el.after(b) : el.append(b);
+          }
         }
         return;
       }
@@ -238,16 +293,18 @@
     }
   }
 
-  function scan(root) { walk(root); fit(); }
-
-  function walk(root) {
-    if (root.nodeType === 3) return handleText(root);
-    if (root.nodeType !== 1 || SKIP.has(root.localName) || root.hasAttribute(ATTR)) return;
-    const w = document.createTreeWalker(root, 5, {            // 5 = elements + text
-      acceptNode: n => n.nodeType === 3 ? 1 : (SKIP.has(n.localName) || n.hasAttribute(ATTR)) ? 2 : 3,
+  function scan(root) {
+    if (root.nodeType === 3) {
+      const p = root.parentElement;
+      if (p && !p.closest(SKIP_SEL)) handleText(root);
+      return;
+    }
+    if (root.nodeType !== 1 || root.closest(SKIP_SEL)) return;
+    const w = document.createTreeWalker(root, 5, {              // 5 = elements + text
+      acceptNode: n => n.nodeType === 3 ? 1 : n.matches(SKIP_SEL) ? 2 : 3,
     });
     const nodes = [];
-    for (let n; (n = w.nextNode());) nodes.push(n);           // collect first, DOM is modified while handling
+    for (let n; (n = w.nextNode());) nodes.push(n);             // collect first, DOM is modified while handling
     nodes.forEach(handleText);
   }
 
@@ -255,7 +312,7 @@
 
   function onMut(recs) {
     for (const r of recs) {
-      if (r.type === 'characterData') {                       // site rewrote a text node -> drop its stale badge, rescan
+      if (r.type === 'characterData') {                         // site rewrote a text node -> drop its stale badge, rescan
         const n = r.target, nx = n.nextSibling;
         done.delete(n);
         if (nx && nx.nodeType === 1 && nx.hasAttribute(ATTR)) nx.remove();
@@ -270,10 +327,11 @@
   function flush() {
     timer = 0;
     if (!mo) return;
+    for (const r of lineRows) if (!r.isConnected) { const l = lines.get(r); if (l) l.remove(); lineRows.delete(r); }
     const items = [...queue];
     queue.clear();
     for (const n of items) if (n.isConnected) scan(n);
-    mo.takeRecords();                                         // ignore the changes we just made ourselves
+    mo.takeRecords();                                           // ignore the changes we just made ourselves
   }
 
   async function start() {
@@ -281,14 +339,16 @@
     active = true;
     const g = ++gen;
     const c = await loadRates();
-    if (g !== gen) return;                                    // switched off while loading
+    if (g !== gen) return;                                      // switched off while loading
     if (!c) { active = false; console.warn('[Price Converter] exchange rates unavailable'); return; }
     rates = c;
     compile(c.r);
-    styleEl = GM_addStyle(CSS);
+    styleEl = GM_addStyle(CSS + Object.entries(SITE_CSS).filter(([h]) => covers(h)).map(([, css]) => css).join(''));
     scan(document.body);
     mo = new MutationObserver(onMut);
-    mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+    // Observe the whole document, not just <body>: some sites (e.g. denpasoft) swap the <body> when you
+    // navigate without a full reload, which would leave an observer on the old body watching nothing.
+    mo.observe(document.documentElement, { childList: true, subtree: true, characterData: true });
   }
 
   function stop() {
@@ -298,9 +358,12 @@
     mo = null;
     clearTimeout(timer); timer = 0; queue.clear();
     document.querySelectorAll(`[${ATTR}]`).forEach(e => e.remove());
+    stacked.forEach(([d, a], row) => { row.style.flexDirection = d; row.style.alignItems = a; });
+    stacked.clear(); lineRows.clear();
     if (styleEl) styleEl.remove();
     styleEl = null;
     done = new WeakSet();
+    lines = new WeakMap();
   }
 
   /* ─────────────────────────── Menu + website manager ─────────────────────────── */
