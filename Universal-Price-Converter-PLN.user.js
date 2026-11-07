@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Price Converter to PLN
 // @namespace    https://github.com/theVersu/hmm
-// @version      1.2.0
+// @version      1.2.1
 // @description  Shows prices converted to Polish zloty (PLN) next to the original price. Any currency (symbol or code), enabled per website, live exchange rates.
 // @author       Claude
 // @license      MIT
@@ -45,6 +45,9 @@
     'mangagamer.com':
       'html body main a.product>p{width:auto!important;min-width:4rem;white-space:nowrap}' +
       'html body main a.product>p>span[data-pln]{display:block;width:max-content;margin:.1em auto 0;font-size:1em}',
+    // Search dropdown: converted price right under the price, right-aligned (fits inside the thumbnail-high entry).
+    'denpasoft.com':
+      '#dp-search-listbox span[data-pln]{display:block;width:max-content;margin:.15em 0 0 auto}',
   };
 
   // Symbol / text marker -> ISO code. "$" and "¥" are ambiguous, change them here if you need (e.g. '¥': 'CNY').
@@ -201,7 +204,7 @@
   // Its converted prices get their own line under the row. If the row sits beside other content in a horizontal flex box
   // (e.g. bundle list), the old/current prices are stacked vertically instead and the badges stay beside each price.
   function lineRow(el) {
-    if (!lineSite) return null;
+    if (!lineSite || el.closest('#dp-search-listbox')) return null;   // search dropdown: badge goes beside the price instead
     const row = el.parentElement;
     if (!row || !/flex/.test(getComputedStyle(row).display)) return null;
     const p = row.parentElement && getComputedStyle(row.parentElement);
@@ -310,7 +313,16 @@
 
   /* ─────────────────────────── Live updates ─────────────────────────── */
 
+  // Our stylesheet lives in <head>. Sites that navigate without a reload (denpasoft) replace the head contents and
+  // throw it away, which left the badges unstyled until a refresh -> put it back whenever it disappears.
+  function ensureStyle() {
+    if (styleEl && styleEl.isConnected) return;
+    const css = CSS + Object.entries(SITE_CSS).filter(([h]) => covers(h)).map(([, c]) => c).join('');
+    styleEl = GM_addStyle(css) || { isConnected: true, remove() {} };
+  }
+
   function onMut(recs) {
+    ensureStyle();
     for (const r of recs) {
       if (r.type === 'characterData') {                         // site rewrote a text node -> drop its stale badge, rescan
         const n = r.target, nx = n.nextSibling;
@@ -343,7 +355,7 @@
     if (!c) { active = false; console.warn('[Price Converter] exchange rates unavailable'); return; }
     rates = c;
     compile(c.r);
-    styleEl = GM_addStyle(CSS + Object.entries(SITE_CSS).filter(([h]) => covers(h)).map(([, css]) => css).join(''));
+    ensureStyle();
     scan(document.body);
     mo = new MutationObserver(onMut);
     // Observe the whole document, not just <body>: some sites (e.g. denpasoft) swap the <body> when you
