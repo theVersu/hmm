@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RJ Code Hub – asmr.one / DLsite / JapaneseASMR
 // @namespace    Violentmonkey Scripts
-// @version      1.2.0
+// @version      1.2.1
 // @description  Jump (same tab) between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, with a live check whether the work exists on the target site, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
 // @author       Claude
 // @match        *://asmr.one/*
@@ -14,7 +14,8 @@
 // @noframes
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
-// @grant        unsafeWindow
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @connect      asmr.one
 // @connect      asmr-200.com
 // @connect      dlsite.com
@@ -193,6 +194,56 @@
     });
   }
 
+  // Script-wide storage (shared across all three sites), with localStorage as a fallback
+  const kv = {
+    get(k) {
+      try { if (typeof GM_getValue === 'function') return GM_getValue(k, null); } catch (e) {}
+      try { return localStorage.getItem(k); } catch (e) { return null; }
+    },
+    set(k, v) {
+      try { if (typeof GM_setValue === 'function') return GM_setValue(k, v); } catch (e) {}
+      try { localStorage.setItem(k, v); } catch (e) {}
+    },
+  };
+
+  // Index of japaneseasmr.com entries (code -> entry URL), filled in passively whenever you browse
+  // that site, so other sites can show a green check + direct link even when the site blocks checks.
+  const JA_INDEX_KEY = 'rjhub:jasmr-index';
+  const JA_INDEX_MAX = 8000;
+  function jaIndexLoad() {
+    try { return JSON.parse(kv.get(JA_INDEX_KEY) || '{}') || {}; } catch (e) { return {}; }
+  }
+  function harvestJasmr() {
+    if (SITE !== 'jasmr') return;
+    const idx = jaIndexLoad();
+    let changed = false;
+    const put = (code, url) => {
+      if (idx[code] === url) return;
+      delete idx[code]; // re-insert so the newest entries stay at the end
+      idx[code] = url;
+      changed = true;
+    };
+    const entryLink = /^https?:\/\/(www\.)?japaneseasmr\.com\/\d+\/?$/i;
+    const bracketed = new RegExp(`\\[(${CODE})\\]`, 'i');
+    const thumb = new RegExp(`(${CODE})_img_`, 'i');
+
+    // Listing / search results: every entry card carries its code and its link
+    document.querySelectorAll('.site-archive-post').forEach((li) => {
+      const m = li.innerHTML.match(bracketed) || li.innerHTML.match(thumb);
+      const a = [...li.querySelectorAll('a[href]')].find((x) => entryLink.test(x.href));
+      if (m && a) put(m[1].toUpperCase(), a.href);
+    });
+    // Single entry page: this very URL is the entry for its code
+    if (/^\/\d+\/?$/.test(location.pathname)) {
+      const c = findCodeJasmr();
+      if (c) put(c, location.origin + location.pathname);
+    }
+    if (!changed) return;
+    const keys = Object.keys(idx);
+    for (const k of keys.slice(0, Math.max(0, keys.length - JA_INDEX_MAX))) delete idx[k];
+    kv.set(JA_INDEX_KEY, JSON.stringify(idx));
+  }
+
   const CHECKERS = {
     // asmr.one has no per-work HTML (it is an SPA), so ask its API.
     // RJ01722913 -> id 1722913 (leading zeros dropped). BJ/VJ use special ids -> can't check.
@@ -234,37 +285,62 @@
       return { state: 'unknown', why: 'HTTP ' + r.status };
     },
 
-    // japaneseasmr.com: search for the code and look for it *inside the results*
-    // (title "[RJ01380529]" or thumbnail name "RJ01380529_img_main.jpg"), then take that entry's link.
+    // japaneseasmr.com is behind Cloudflare, which often answers scripted requests with HTTP 403.
+    // So: (1) use what the script learned while you browsed the site, (2) try the search page,
+    // (3) try the WordPress REST search, (4) otherwise report "can't verify".
     async jasmr(code) {
-      const searchUrl = TARGETS.jasmr.url(code);
-      const r = await request(searchUrl, { ...HTML_HEADERS, Referer: 'https://japaneseasmr.com/' });
-      const html = r.responseText || '';
-      log('jasmr', r.status, html.length + ' bytes');
-      if (r.status !== 200) return { state: 'unknown', why: 'HTTP ' + r.status };
+      const learned = jaIndexLoad()[code];
+      if (learned) return { state: 'yes', url: learned };
 
-      // The search box / page title echo the code too, so only count real result markup
-      const evidence = new RegExp(`\\[${code}\\]|${code}_img_|/${code}[._]`, 'i');
-      const entryLink = /^https?:\/\/(www\.)?japaneseasmr\.com\/\d+\/?$/i;
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      for (const sel of ['.site-archive-post', 'article']) {
-        for (const el of doc.querySelectorAll(sel)) {
-          if (!evidence.test(el.innerHTML)) continue;
-          const links = [...el.querySelectorAll('a[href]')].map((a) => new URL(a.getAttribute('href'), searchUrl).href);
-          const entry = links.find((h) => entryLink.test(h));
-          if (entry) return { state: 'yes', url: entry };
+      const searchUrl = TARGETS.jasmr.url(code);
+      let r;
+      try { r = await request(searchUrl, HTML_HEADERS); } catch (e) { r = { status: 0, responseText: '' }; }
+      const html = r.responseText || '';
+      log('jasmr search', r.status, html.length + ' bytes');
+
+      if (r.status === 200) {
+        // The search box / page title echo the code too, so only count real result markup:
+        // "[RJ01380529]" in the entry text or the thumbnail name "RJ01380529_img_main.jpg"
+        const evidence = new RegExp(`\\[${code}\\]|${code}_img_|/${code}[._]`, 'i');
+        const entryLink = /^https?:\/\/(www\.)?japaneseasmr\.com\/\d+\/?$/i;
+        const doc = new DOMParser().parseFromString(html, 'text/html');
+        for (const sel of ['.site-archive-post', 'article']) {
+          for (const el of doc.querySelectorAll(sel)) {
+            if (!evidence.test(el.innerHTML)) continue;
+            const links = [...el.querySelectorAll('a[href]')].map((a) => new URL(a.getAttribute('href'), searchUrl).href);
+            const entry = links.find((h) => entryLink.test(h));
+            if (entry) return { state: 'yes', url: entry };
+          }
         }
+        const at = html.search(evidence);
+        if (at >= 0) {
+          const before = html.slice(Math.max(0, at - 4000), at);
+          const links = [...before.matchAll(/https?:\/\/(?:www\.)?japaneseasmr\.com\/\d+\/?/gi)];
+          return { state: 'yes', url: links.length ? links[links.length - 1][0] : undefined };
+        }
+        if (/Search Results for|site-archive-post|Nothing Found/i.test(html)) return { state: 'no' };
       }
-      // Fallback on the raw HTML: nearest entry link before the evidence
-      const at = html.search(evidence);
-      if (at >= 0) {
-        const before = html.slice(Math.max(0, at - 4000), at);
-        const links = [...before.matchAll(/https?:\/\/(?:www\.)?japaneseasmr\.com\/\d+\/?/gi)];
-        return { state: 'yes', url: links.length ? links[links.length - 1][0] : undefined };
-      }
-      // A genuine results page without a match = not on the site; anything else = can't tell
-      if (/Search Results for|site-archive-post|Nothing Found/i.test(html)) return { state: 'no' };
-      return { state: 'unknown', why: 'unrecognised page (' + html.length + ' bytes)' };
+
+      // Search page blocked or unreadable: try the WordPress REST search
+      try {
+        const rr = await request(
+          `https://japaneseasmr.com/wp-json/wp/v2/posts?search=${code}&per_page=5&_fields=link,title,content`,
+          { Accept: 'application/json' });
+        log('jasmr rest', rr.status);
+        if (rr.status === 200) {
+          const posts = JSON.parse(rr.responseText);
+          if (Array.isArray(posts)) {
+            const hit = posts.find((p) => JSON.stringify(p).toUpperCase().includes(code));
+            if (hit && hit.link) return { state: 'yes', url: hit.link };
+            return { state: 'no' };
+          }
+        }
+      } catch (e) { log('jasmr rest failed', e.message); }
+
+      return {
+        state: 'unknown',
+        why: `HTTP ${r.status || 'error'}: the site blocks scripted checks. Open it once and the script will remember the entry`,
+      };
     },
   };
 
@@ -676,6 +752,7 @@
   else if (coarse.addListener) coarse.addListener(applyUI);
 
   function refresh() {
+    if (SITE === 'jasmr') harvestJasmr();
     const code = findCode();
     if (code) ensureChecks(code);
     const items = buildItems(code);
@@ -706,19 +783,9 @@
   }
 
   ['popstate', 'hashchange'].forEach((ev) => window.addEventListener(ev, onUrlMaybeChanged));
-  // Hook SPA navigation (asmr.one). With @grant the script is sandboxed, so patch the page's own
-  // history object; if the browser refuses, the polling below still catches every URL change.
-  try {
-    const pageHistory = (typeof unsafeWindow !== 'undefined' ? unsafeWindow : window).history;
-    ['pushState', 'replaceState'].forEach((fn) => {
-      const orig = pageHistory[fn];
-      pageHistory[fn] = function () {
-        const r = orig.apply(this, arguments);
-        setTimeout(onUrlMaybeChanged, 0);
-        return r;
-      };
-    });
-  } catch (e) { /* polling fallback */ }
+  // SPA navigation (asmr.one): deliberately NOT patching history.pushState/replaceState. With a
+  // sandboxed script that breaks the site's router state and made asmr.one fall over. Polling
+  // the URL (below) plus popstate/hashchange catches every page change without touching the page.
   setInterval(onUrlMaybeChanged, CONFIG.urlPollMs); // fallback for anything missed
 
   applyUI();
