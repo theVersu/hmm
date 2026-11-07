@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RJ Code Hub – asmr.one / DLsite / JapaneseASMR
 // @namespace    Violentmonkey Scripts
-// @version      1.2.1
+// @version      1.3.0
 // @description  Jump (same tab) between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, with a live check whether the work exists on the target site, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
 // @author       Claude
 // @match        *://asmr.one/*
@@ -16,8 +16,13 @@
 // @grant        GM.xmlHttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_openInTab
+// @grant        GM_addValueChangeListener
+// @grant        GM_removeValueChangeListener
 // @connect      asmr.one
 // @connect      asmr-200.com
+// @connect      asmr-100.com
+// @connect      asmr-300.com
 // @connect      dlsite.com
 // @connect      japaneseasmr.com
 // @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/rj-code-hub.user.js
@@ -47,7 +52,11 @@
     // How long to remember a result (minutes) before checking again
     cacheMinutes: { yes: 360, no: 30, unknown: 2 },
     // asmr.one API hosts to try, in order (used only for the availability check)
-    asmrApiHosts: ['api.asmr-200.com', 'api.asmr.one'],
+    asmrApiHosts: ['api.asmr-200.com', 'api.asmr.one', 'api.asmr-100.com', 'api.asmr-300.com'],
+    // japaneseasmr.com blocks scripted requests (Cloudflare, HTTP 403). When that happens the script
+    // briefly opens the search in a real background tab (a normal visit, so Cloudflare lets it
+    // through), reads the result there, and closes the tab again. Set to false to disable.
+    jasmrBackgroundTab: true,
     // Log every availability decision to the browser console
     debug: false,
   };
@@ -181,11 +190,11 @@
 
   const HTML_HEADERS = { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.8' };
 
-  function request(url, headers) {
+  function request(url, headers, timeout) {
     return new Promise((resolve, reject) => {
       if (!gmXhr) return reject(new Error('GM_xmlhttpRequest unavailable'));
       gmXhr({
-        method: 'GET', url, headers: headers || {}, timeout: 15000,
+        method: 'GET', url, headers: headers || {}, timeout: timeout || 15000,
         onload: (r) => resolve(r),
         onerror: () => reject(new Error('network error')),
         ontimeout: () => reject(new Error('timeout')),
@@ -244,6 +253,67 @@
     kv.set(JA_INDEX_KEY, JSON.stringify(idx));
   }
 
+  // --- Real-browser fallback for japaneseasmr.com -------------------------------------------
+  // Opener side: open the search in a background tab (marked with #rjhub-bg), wait for the helper
+  // running inside that tab to store its verdict in the shared script storage, then close the tab.
+  let bgChain = Promise.resolve(); // one background tab at a time
+  function jasmrViaTab(code) {
+    const run = () => new Promise((resolve) => {
+      if (!CONFIG.jasmrBackgroundTab || typeof GM_openInTab !== 'function') return resolve(null);
+      const key = 'rjhub:jasmr-result:' + code;
+      const started = Date.now();
+      let tab = null, finished = false, poll = null, to = null, lid = null;
+      const finish = (res) => {
+        if (finished) return;
+        finished = true;
+        clearInterval(poll);
+        clearTimeout(to);
+        try { if (lid != null && typeof GM_removeValueChangeListener === 'function') GM_removeValueChangeListener(lid); } catch (e) {}
+        try { if (tab && tab.close) tab.close(); } catch (e) {}
+        resolve(res);
+      };
+      const check = () => {
+        try {
+          const r = JSON.parse(kv.get(key) || 'null');
+          if (r && r.state && r.t >= started) finish(r);
+        } catch (e) {}
+      };
+      kv.set(key, '');
+      try { if (typeof GM_addValueChangeListener === 'function') lid = GM_addValueChangeListener(key, check); } catch (e) {}
+      poll = setInterval(check, 700);
+      to = setTimeout(() => finish(null), 30000);
+      try {
+        tab = GM_openInTab(TARGETS.jasmr.url(code) + '#rjhub-bg', { active: false, insert: true, setParent: true });
+      } catch (e) { finish(null); }
+    });
+    const p = bgChain.then(run, run);
+    bgChain = p.catch(() => {});
+    return p;
+  }
+
+  // Helper side: runs inside that background tab (a normal visit, so Cloudflare lets it through).
+  // Reads the results, remembers the entries, reports the verdict, and does nothing else.
+  function runBgHelper() {
+    const q = new URLSearchParams(location.search).get('s') || '';
+    const m = q.match(new RegExp(`(${CODE})`, 'i'));
+    if (!m) return;
+    const C = m[1].toUpperCase();
+    const key = 'rjhub:jasmr-result:' + C;
+    let n = 0;
+    const tick = () => {
+      if (++n > 60) return; // ~30 s, then give up (the opener times out as well)
+      harvestJasmr();
+      const url = jaIndexLoad()[C];
+      let res = null;
+      if (url) res = { state: 'yes', url };
+      else if (document.body && (document.body.classList.contains('search-no-results') || /Nothing Found/i.test(document.body.innerText || ''))) res = { state: 'no' };
+      else if (document.querySelector('.site-archive-post') && document.readyState === 'complete') res = { state: 'no' };
+      if (res) { res.t = Date.now(); kv.set(key, JSON.stringify(res)); return; }
+      setTimeout(tick, 500);
+    };
+    tick();
+  }
+
   const CHECKERS = {
     // asmr.one has no per-work HTML (it is an SPA), so ask its API.
     // RJ01722913 -> id 1722913 (leading zeros dropped). BJ/VJ use special ids -> can't check.
@@ -256,7 +326,7 @@
         let verdict = null;
         for (const path of ['workInfo', 'work']) {
           try {
-            const r = await request(`https://${host}/api/${path}/${id}`);
+            const r = await request(`https://${host}/api/${path}/${id}`, undefined, 8000);
             log('asmr', host, path, r.status);
             if (r.status === 200) {
               try {
@@ -266,7 +336,7 @@
               verdict = verdict || 'err'; why = 'unexpected API reply';
             } else if (r.status === 404 || r.status === 400) verdict = 'no';
             else { verdict = verdict || 'err'; why = 'HTTP ' + r.status; }
-          } catch (e) { verdict = verdict || 'err'; why = e.message; }
+          } catch (e) { verdict = verdict || 'err'; why = e.message; break; } // host unreachable: next host
         }
         if (verdict === 'no') return { state: 'no' };
       }
@@ -337,9 +407,14 @@
         }
       } catch (e) { log('jasmr rest failed', e.message); }
 
+      // Still blocked: do a real visit in a background tab and read the result there
+      const viaTab = await jasmrViaTab(code);
+      if (viaTab) return { state: viaTab.state, url: viaTab.url };
+
       return {
         state: 'unknown',
-        why: `HTTP ${r.status || 'error'}: the site blocks scripted checks. Open it once and the script will remember the entry`,
+        why: `HTTP ${r.status || 'error'}: the site blocks scripted checks` +
+          (CONFIG.jasmrBackgroundTab ? ' and the background tab gave no answer' : ''),
       };
     },
   };
@@ -751,7 +826,11 @@
   if (coarse.addEventListener) coarse.addEventListener('change', applyUI);
   else if (coarse.addListener) coarse.addListener(applyUI);
 
+  // Background-tab helper mode (see runBgHelper): no UI, no checks, just report back
+  const BG_HELPER = SITE === 'jasmr' && /rjhub-bg/.test(location.hash);
+
   function refresh() {
+    if (BG_HELPER) return false;
     if (SITE === 'jasmr') harvestJasmr();
     const code = findCode();
     if (code) ensureChecks(code);
@@ -788,7 +867,11 @@
   // the URL (below) plus popstate/hashchange catches every page change without touching the page.
   setInterval(onUrlMaybeChanged, CONFIG.urlPollMs); // fallback for anything missed
 
-  applyUI();
-  settle();
-  window.addEventListener('load', settle);
+  if (BG_HELPER) {
+    runBgHelper();
+  } else {
+    applyUI();
+    settle();
+    window.addEventListener('load', settle);
+  }
 })();
