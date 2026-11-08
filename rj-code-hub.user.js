@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RJ Code Hub – asmr.one / DLsite / JapaneseASMR
 // @namespace    Violentmonkey Scripts
-// @version      1.4.0
+// @version      1.4.2
 // @description  Jump (same tab) between asmr.one, dlsite.com and japaneseasmr.com using the RJ code of the current work, with a live check whether the work exists on the target site, plus a www/non-www toggle on asmr.one. Desktop and mobile (touch) layouts are switched automatically.
 // @author       Claude
 // @match        *://asmr.one/*
@@ -56,10 +56,25 @@
     cacheMinutes: { yes: 360, no: 30, unknown: 2 },
     // asmr.one API hosts to try, in order (used only for the availability check)
     asmrApiHosts: ['api.asmr-200.com', 'api.asmr.one', 'api.asmr-100.com', 'api.asmr-300.com'],
-    // japaneseasmr.com / hentaiasmr.moe may block scripted requests (Cloudflare, HTTP 403). When that happens the script
-    // briefly opens the search in a real background tab (a normal visit, so Cloudflare lets it
-    // through), reads the result there, and closes the tab again. Set to false to disable.
-    backgroundTab: true,
+    // --- Being gentle with the sites (Cloudflare blocks bot-like traffic) ---
+    // Wait this long (ms) after a page opens before checking; skipped if you already moved on
+    checkDelayMs: 1200,
+    // Minimum gap (ms) between two requests to the same site
+    minGapMs: 4000,
+    // After a site answers a check with "blocked" (403/429/503), send it NOTHING for this many minutes
+    cooldownMinutes: 180,
+    // japaneseasmr.com refuses scripted requests (Cloudflare, HTTP 403), so it is never asked directly.
+    // It is checked in a real background tab instead (a normal visit that Cloudflare accepts); the
+    // tab reads the search result, then closes. Entries already seen while browsing need no tab.
+    jasmrBackgroundTab: true,
+    // Pace of those tabs: strictly one at a time, at least this many ms apart ...
+    tabGapMs: 25000,
+    // ... and at most this many per hour (across all your tabs)
+    maxTabsPerHour: 20,
+    // If a tab got no answer (e.g. an interactive Cloudflare check), leave that site alone for this many minutes
+    tabFailCooldownMinutes: 30,
+    // hentaiasmr.moe only: if a scripted check is blocked, also fall back to a background tab (off by default)
+    backgroundTab: false,
     // Log every availability decision to the browser console
     debug: false,
   };
@@ -204,7 +219,11 @@
 
   const HTML_HEADERS = { Accept: 'text/html,application/xhtml+xml,*/*;q=0.8', 'Accept-Language': 'en-US,en;q=0.8' };
 
-  function request(url, headers, timeout) {
+  const hostChain = {};  // host -> promise chain, so requests to one site are strictly one at a time
+  const hostLastDone = {};
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  function rawRequest(url, headers, timeout) {
     return new Promise((resolve, reject) => {
       if (!gmXhr) return reject(new Error('GM_xmlhttpRequest unavailable'));
       gmXhr({
@@ -215,6 +234,18 @@
         onabort: () => reject(new Error('aborted')),
       });
     });
+  }
+
+  function request(url, headers, timeout) {
+    const host = new URL(url).hostname;
+    const p = (hostChain[host] || Promise.resolve()).then(async () => {
+      const wait = (hostLastDone[host] || 0) + CONFIG.minGapMs - Date.now();
+      if (wait > 0) await sleep(wait);
+      try { return await rawRequest(url, headers, timeout); }
+      finally { hostLastDone[host] = Date.now(); }
+    });
+    hostChain[host] = p.catch(() => {});
+    return p;
   }
 
   // Script-wide storage (shared across all three sites), with localStorage as a fallback
@@ -271,9 +302,32 @@
   // Opener side: open the search in a background tab (marked with #rjhub-bg), wait for the helper
   // running inside that tab to store its verdict in the shared script storage, then close the tab.
   let bgChain = Promise.resolve(); // one background tab at a time
-  function viaTab(target, code) {
-    const run = () => new Promise((resolve) => {
-      if (!CONFIG.backgroundTab || typeof GM_openInTab !== 'function') return resolve(null);
+  let lastTabAt = 0;
+  // Spacing + hourly budget are kept in the shared storage, so they hold across pages and tabs
+  function tabBudgetLeft() {
+    let stamps = [];
+    try { stamps = JSON.parse(kv.get('rjhub:tab-stamps') || '[]'); } catch (e) {}
+    const cutoff = Date.now() - 3600000;
+    stamps = stamps.filter((x) => x > cutoff);
+    const ok = stamps.length < CONFIG.maxTabsPerHour;
+    if (ok) stamps.push(Date.now());
+    kv.set('rjhub:tab-stamps', JSON.stringify(stamps));
+    return ok;
+  }
+
+  // Resolves with the helper's verdict, null if there was no answer, or 'skip' if you moved on first
+  function viaTab(target, code, stillWanted) {
+    const run = async () => {
+      const last = Math.max(lastTabAt, Number(kv.get('rjhub:last-tab')) || 0);
+      const wait = last + CONFIG.tabGapMs - Date.now(); // spacing between tabs
+      if (wait > 0) await sleep(wait);
+      if (stillWanted && !stillWanted()) return 'skip'; // you moved on while this was queued
+      if (!tabBudgetLeft()) return null;                // hourly cap reached
+      lastTabAt = Date.now();
+      kv.set('rjhub:last-tab', String(lastTabAt));
+      return new Promise((resolve) => {
+      const allowed = target === 'jasmr' ? CONFIG.jasmrBackgroundTab : CONFIG.backgroundTab;
+      if (!allowed || typeof GM_openInTab !== 'function') return resolve(null);
       const key = `rjhub:tab:${target}:${code}`;
       const started = Date.now();
       let tab = null, finished = false, poll = null, to = null, lid = null;
@@ -299,7 +353,8 @@
       try {
         tab = GM_openInTab(TARGETS[target].url(code) + '#rjhub-bg', { active: false, insert: true, setParent: true });
       } catch (e) { finish(null); }
-    });
+      });
+    };
     const p = bgChain.then(run, run);
     bgChain = p.catch(() => {});
     return p;
@@ -362,6 +417,17 @@
     else runBgHelperJasmr();
   }
 
+  // Circuit breaker: once a site answers "blocked", stop sending it anything for a while
+  const BLOCK_STATUS = [403, 429, 503];
+  function coolingDown(t) {
+    const until = Number(kv.get('rjhub:cooldown:' + t)) || 0;
+    return until > Date.now() ? until : 0;
+  }
+  function startCooldown(t, minutes) {
+    kv.set('rjhub:cooldown:' + t, String(Date.now() + (minutes || CONFIG.cooldownMinutes) * 60000));
+  }
+  const blockedWhy = (status) => `HTTP ${status}: the site blocked a check, so checks are paused for ${CONFIG.cooldownMinutes} min`;
+
   const CHECKERS = {
     // asmr.one has no per-work HTML (it is an SPA), so ask its API.
     // RJ01722913 -> id 1722913 (leading zeros dropped). BJ/VJ use special ids -> can't check.
@@ -383,6 +449,7 @@
               } catch (e) { /* not JSON */ }
               verdict = verdict || 'err'; why = 'unexpected API reply';
             } else if (r.status === 404 || r.status === 400) verdict = 'no';
+            else if (BLOCK_STATUS.includes(r.status)) { startCooldown('asmr'); return { state: 'unknown', why: blockedWhy(r.status) }; }
             else { verdict = verdict || 'err'; why = 'HTTP ' + r.status; }
           } catch (e) { verdict = verdict || 'err'; why = e.message; break; } // host unreachable: next host
         }
@@ -400,11 +467,11 @@
       if (r.status === 200) {
         return (r.finalUrl || url).toUpperCase().includes(code) ? { state: 'yes' } : { state: 'no' };
       }
+      if (BLOCK_STATUS.includes(r.status)) { startCooldown('dlsite'); return { state: 'unknown', why: blockedWhy(r.status) }; }
       return { state: 'unknown', why: 'HTTP ' + r.status };
     },
 
-    // hentaiasmr.moe: the work page itself (the id is in the URL). If the site blocks the scripted
-    // request (Cloudflare challenge / 403), do a real visit in a background tab instead.
+    // hentaiasmr.moe: the work page itself (the id is in the URL)
     async hasmr(code) {
       const url = TARGETS.hasmr.url(code);
       let r;
@@ -417,77 +484,32 @@
         if (/\b404\b|not found/i.test(title)) return { state: 'no' };
         return (r.finalUrl || url).toUpperCase().includes(code) ? { state: 'yes' } : { state: 'no' };
       }
-      const blocked = challenged || [403, 429, 503].includes(r.status);
-      if (blocked) {
-        const viaT = await viaTab('hasmr', code);
-        if (viaT) return { state: viaT.state };
+      if (challenged || BLOCK_STATUS.includes(r.status)) {
+        if (CONFIG.backgroundTab) {
+          const viaT = await viaTab('hasmr', code);
+          if (viaT) return { state: viaT.state };
+        }
+        startCooldown('hasmr');
+        return { state: 'unknown', why: blockedWhy(r.status || 'challenge') };
       }
-      return {
-        state: 'unknown',
-        why: `HTTP ${r.status || 'error'}` + (blocked ? ': the site blocks scripted checks' + (CONFIG.backgroundTab ? ' and the background tab gave no answer' : '') : ''),
-      };
+      return { state: 'unknown', why: 'HTTP ' + (r.status || 'error') };
     },
 
-    // japaneseasmr.com is behind Cloudflare, which often answers scripted requests with HTTP 403.
-    // So: (1) use what the script learned while you browsed the site, (2) try the search page,
-    // (3) try the WordPress REST search, (4) otherwise report "can't verify".
+    // japaneseasmr.com is behind Cloudflare, which refuses scripted requests, so it is never asked
+    // directly: (1) entries learned while browsing, (2) one real background tab, slowly.
     async jasmr(code) {
       const learned = jaIndexLoad()[code];
       if (learned) return { state: 'yes', url: learned };
-
-      const searchUrl = TARGETS.jasmr.url(code);
-      let r;
-      try { r = await request(searchUrl, HTML_HEADERS); } catch (e) { r = { status: 0, responseText: '' }; }
-      const html = r.responseText || '';
-      log('jasmr search', r.status, html.length + ' bytes');
-
-      if (r.status === 200) {
-        // The search box / page title echo the code too, so only count real result markup:
-        // "[RJ01380529]" in the entry text or the thumbnail name "RJ01380529_img_main.jpg"
-        const evidence = new RegExp(`\\[${code}\\]|${code}_img_|/${code}[._]`, 'i');
-        const entryLink = /^https?:\/\/(www\.)?japaneseasmr\.com\/\d+\/?$/i;
-        const doc = new DOMParser().parseFromString(html, 'text/html');
-        for (const sel of ['.site-archive-post', 'article']) {
-          for (const el of doc.querySelectorAll(sel)) {
-            if (!evidence.test(el.innerHTML)) continue;
-            const links = [...el.querySelectorAll('a[href]')].map((a) => new URL(a.getAttribute('href'), searchUrl).href);
-            const entry = links.find((h) => entryLink.test(h));
-            if (entry) return { state: 'yes', url: entry };
-          }
-        }
-        const at = html.search(evidence);
-        if (at >= 0) {
-          const before = html.slice(Math.max(0, at - 4000), at);
-          const links = [...before.matchAll(/https?:\/\/(?:www\.)?japaneseasmr\.com\/\d+\/?/gi)];
-          return { state: 'yes', url: links.length ? links[links.length - 1][0] : undefined };
-        }
-        if (/Search Results for|site-archive-post|Nothing Found/i.test(html)) return { state: 'no' };
+      if (!CONFIG.jasmrBackgroundTab) {
+        return { state: 'unknown', why: 'not seen yet: open it on japaneseasmr.com once and the script remembers it' };
       }
-
-      // Search page blocked or unreadable: try the WordPress REST search
-      try {
-        const rr = await request(
-          `https://japaneseasmr.com/wp-json/wp/v2/posts?search=${code}&per_page=5&_fields=link,title,content`,
-          { Accept: 'application/json' });
-        log('jasmr rest', rr.status);
-        if (rr.status === 200) {
-          const posts = JSON.parse(rr.responseText);
-          if (Array.isArray(posts)) {
-            const hit = posts.find((p) => JSON.stringify(p).toUpperCase().includes(code));
-            if (hit && hit.link) return { state: 'yes', url: hit.link };
-            return { state: 'no' };
-          }
-        }
-      } catch (e) { log('jasmr rest failed', e.message); }
-
-      // Still blocked: do a real visit in a background tab and read the result there
-      const viaT = r.status ? await viaTab('jasmr', code) : null;
-      if (viaT) return { state: viaT.state, url: viaT.url };
-
+      const res = await viaTab('jasmr', code, () => findCode() === code);
+      if (res === 'skip') return { state: 'unknown', why: 'skipped (you moved to another page)' };
+      if (res) return { state: res.state, url: res.url };
+      startCooldown('jasmr', CONFIG.tabFailCooldownMinutes);
       return {
         state: 'unknown',
-        why: `HTTP ${r.status || 'error'}: the site blocks scripted checks` +
-          (CONFIG.backgroundTab ? ' and the background tab gave no answer' : ''),
+        why: `the background tab gave no answer (Cloudflare check or tab limit); trying again in ${CONFIG.tabFailCooldownMinutes} min`,
       };
     },
   };
@@ -518,18 +540,34 @@
       if (cachedResult(t, code)) continue;
       const key = t + ':' + code;
       if (!CONFIG.checkAvailability) { avail.set(key, { state: 'unknown', t: Date.now() }); continue; }
+
+      const pausedWhy = () => {
+        const until = coolingDown(t);
+        if (!until) return null;
+        if (t === 'jasmr' && jaIndexLoad()[code]) return null; // learned entries need no request
+        return `checks on ${TARGETS[t].name} are paused for ${Math.ceil((until - Date.now()) / 60000)} more min (it blocked one earlier)`;
+      };
+      const paused = pausedWhy();
+      if (paused) { avail.set(key, { state: 'unknown', why: paused, t: Date.now() }); continue; }
+
       avail.set(key, { state: 'checking', t: Date.now() });
-      CHECKERS[t](code)
-        .catch((err) => { log(t, 'check failed:', err.message); return { state: 'unknown', why: err.message }; })
-        .then((res) => {
-          const e = { state: res.state, url: res.url, why: res.why, t: Date.now() };
-          avail.set(key, e);
-          if (e.state === 'yes' || e.state === 'no') {
-            try { localStorage.setItem(storageKey(t, code), JSON.stringify({ s: e.state, u: e.url, t: e.t })); } catch (err) {}
-          }
-          log(t, code, '->', e.state, e.url || '');
-          refresh();
-        });
+      const learnedNow = t === 'jasmr' && !!jaIndexLoad()[code];
+      setTimeout(() => {
+        if (findCode() !== code) { avail.delete(key); return; } // you already moved on: send nothing
+        const p2 = pausedWhy();
+        if (p2) { avail.set(key, { state: 'unknown', why: p2, t: Date.now() }); refresh(); return; }
+        CHECKERS[t](code)
+          .catch((err) => { log(t, 'check failed:', err.message); return { state: 'unknown', why: err.message }; })
+          .then((res) => {
+            const e = { state: res.state, url: res.url, why: res.why, t: Date.now() };
+            avail.set(key, e);
+            if (e.state === 'yes' || e.state === 'no') {
+              try { localStorage.setItem(storageKey(t, code), JSON.stringify({ s: e.state, u: e.url, t: e.t })); } catch (err) {}
+            }
+            log(t, code, '->', e.state, e.url || '');
+            refresh();
+          });
+      }, learnedNow ? 0 : t === 'jasmr' ? Math.max(CONFIG.checkDelayMs, 2500) : CONFIG.checkDelayMs);
     }
   }
 
