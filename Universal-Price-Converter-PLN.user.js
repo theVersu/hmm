@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Universal Price Converter to PLN
 // @namespace    https://github.com/theVersu/hmm
-// @version      1.2.1
+// @version      1.2.2
 // @description  Shows prices converted to Polish zloty (PLN) next to the original price. Any currency (symbol or code), enabled per website, live exchange rates.
 // @author       Claude
 // @license      MIT
@@ -86,11 +86,12 @@
   let rates = null;                    // { src, date, r: { CODE: PLN per 1 unit } }
   let RE, RE1, ONLY;                   // compiled once rates are known
   let active = false, gen = 0, mo = null, timer = 0, styleEl = null;
-  let done = new WeakSet();            // text nodes / elements already handled
+  const badges = new Set();            // every badge we placed; cleaned up when the price it belongs to disappears
   let lines = new WeakMap();           // price row -> line with converted prices below it
   const lineRows = new Set();
   const stacked = new Map();           // price groups we switched to a vertical layout (restored on switch-off)
-  const srcOf = new WeakMap();         // badge in a line -> the price element it belongs to
+  const srcOf = new WeakMap();         // badge -> the price text node / element it belongs to
+  const isBadge = n => !!n && n.nodeType === 1 && n.localName === 'span' && n.hasAttribute(ATTR);
   const queue = new Set();
   const fmt = new Intl.NumberFormat('pl-PL', { style: 'currency', currency: 'PLN' });
 
@@ -137,7 +138,7 @@
     // 1) currency before number  ($12.99, USD 12.99, $12.99 USD)   2) number before currency (12.99 USD, 1,980円)
     const src =
       `(?<![A-Za-z])(?<c1>${CUR})[ \\u00A0]?(?<n1>${NUM})(?:[ \\u00A0]?(?<c3>${codes})(?![A-Za-z]))?` +
-      `|(?<![\\d.,])(?<n2>${NUM})[ \\u00A0]?(?<c2>${CUR})(?![A-Za-z\\d])`;
+      `|(?<![\\d.,])(?<!\\$[^\\s$]*)(?<n2>${NUM})[ \\u00A0]?(?<c2>${CUR})(?![A-Za-z\\d])`;   // not inside $tag:15$ style tokens
     RE = new RegExp(src, 'g');
     RE1 = new RegExp(src);
     ONLY = new RegExp(`^\\s*(?:${CUR})\\s*$`);
@@ -190,12 +191,34 @@
 
   const tokens = el => `${crossed(el) ? 'old ' : ''}${darkBehind(el) ? 'dark' : 'light'}`;
 
-  function badge(c, tok) {
+  function badge(c, tok, src) {
     const b = document.createElement('span');
     b.setAttribute(ATTR, tok);
     b.textContent = '≈ ' + fmt.format(c.pln);
     b.title = `1 ${c.code} = ${c.rate.toPrecision(5)} PLN (${rates.src}, ${rates.date})`;
+    srcOf.set(b, src);
+    badges.add(b);
     return b;
+  }
+
+  // Remove badges whose price was re-rendered / replaced (page translators, SPA updates) and empty lines.
+  function cleanup() {
+    for (const b of badges) {
+      const s = srcOf.get(b);
+      if (!b.isConnected) badges.delete(b);
+      else if (s && !s.isConnected) { b.remove(); badges.delete(b); }
+    }
+    for (const r of lineRows) {
+      const l = lines.get(r);
+      if (!r.isConnected || !l || !l.firstChild) { if (l) l.remove(); lines.delete(r); lineRows.delete(r); }
+    }
+  }
+
+  // Element a price text belongs to, looking through <font> wrappers that page translators add.
+  function priceEl(node) {
+    let el = node.parentElement;
+    while (el && el.localName === 'font') el = el.parentElement;
+    return el;
   }
 
   /* ─────────────────────────── Placement ─────────────────────────── */
@@ -222,7 +245,10 @@
   // Drop badges of this price from an earlier pass (the site re-rendered it) and of prices that no longer exist.
   function purge(row, src) {
     const line = lines.get(row);
-    if (line) for (const x of [...line.children]) { const s = srcOf.get(x); if (!s || s === src || !s.isConnected) x.remove(); }
+    if (line) for (const x of [...line.children]) {
+      const s = srcOf.get(x);
+      if (!s || s === src || !s.isConnected) { x.remove(); badges.delete(x); }
+    }
   }
 
   function addToLine(row, b, src) {
@@ -242,49 +268,56 @@
 
   // Price fully inside one text node (possibly several prices).
   function inject(node, hits) {
-    const el = node.parentElement;
+    const el = priceEl(node);
     if (!el) return;
-    const tok = tokens(el), row = lineRow(el);
-    done.add(node);
-    if (row) {
+    const row = lineRow(el);
+    if (row) {                                                // line mode: re-adding replaces this price's badges
+      const tok = tokens(el);
       purge(row, el);
-      for (const { c } of hits) addToLine(row, badge(c, tok), el);
+      for (const { c } of hits) addToLine(row, badge(c, tok, el), el);
       return;
     }
+    const nx = node.nextSibling;
+    if (isBadge(nx)) {
+      if (srcOf.get(nx) === node) return;                     // this price already has its badge
+      nx.remove(); badges.delete(nx);                         // leftover badge of an older version of this text
+    }
+    const tok = tokens(el), made = [];
     for (let i = hits.length - 1; i >= 0; i--) {              // back to front so indexes stay valid
       const { m, c } = hits[i], end = m.index + m[0].length;
-      let ref = node.nextSibling;
-      if (end < node.length) { ref = node.splitText(end); done.add(ref); }
-      node.parentNode.insertBefore(badge(c, tok), ref);
+      const ref = end < node.length ? node.splitText(end) : node.nextSibling;
+      const b = badge(c, tok, node);
+      node.parentNode.insertBefore(b, ref);
+      made.push(b);
     }
+    for (const b of made) srcOf.set(b, b.previousSibling);    // the text piece that ends right before each badge
   }
 
   // Price split over several elements, e.g. <span>1,980</span><span>JPY</span> or <b>$</b><i>12.99</i>.
   function injectSplit(node) {
-    let el = node.parentElement;
+    let el = priceEl(node);
     for (let i = 0; el && i < 3; i++, el = el.parentElement) {
-      if (done.has(el)) return;
       const t = el.textContent.trim();
       if (t.length > 40) return;
       const m = RE1.exec(t);
       if (m && m[0].length === t.length) {
-        done.add(el); done.add(node);
         const c = convert(m.groups);
-        if (c) {
-          const tok = tokens(el), row = lineRow(el);
-          if (row) { purge(row, el); addToLine(row, badge(c, tok), el); }
-          else {
-            const b = badge(c, tok);
-            /^inline/.test(getComputedStyle(el).display) ? el.after(b) : el.append(b);
-          }
+        if (!c) return;
+        const row = lineRow(el);
+        if (row) { purge(row, el); addToLine(row, badge(c, tokens(el), el), el); return; }
+        const had = isBadge(el.nextSibling) ? el.nextSibling : isBadge(el.lastChild) ? el.lastChild : null;
+        if (had) {
+          if (srcOf.get(had) === el) return;                    // already has its badge
+          had.remove(); badges.delete(had);
         }
+        const b = badge(c, tokens(el), el);
+        /^inline/.test(getComputedStyle(el).display) ? el.after(b) : el.append(b);
         return;
       }
     }
   }
 
   function handleText(node) {
-    if (done.has(node)) return;
     const t = node.nodeValue;
     if (t.length > 600 || /^[\d\s.,:/-]*$/.test(t)) return;    // nothing to see (empty, whitespace, plain numbers)
     if (/\d/.test(t)) {
@@ -326,8 +359,7 @@
     for (const r of recs) {
       if (r.type === 'characterData') {                         // site rewrote a text node -> drop its stale badge, rescan
         const n = r.target, nx = n.nextSibling;
-        done.delete(n);
-        if (nx && nx.nodeType === 1 && nx.hasAttribute(ATTR)) nx.remove();
+        if (isBadge(nx) && srcOf.get(nx) === n) { nx.remove(); badges.delete(nx); }
         queue.add(n);
       } else {
         for (const a of r.addedNodes) if (a.nodeType === 3 || (a.nodeType === 1 && !a.hasAttribute(ATTR))) queue.add(a);
@@ -339,7 +371,7 @@
   function flush() {
     timer = 0;
     if (!mo) return;
-    for (const r of lineRows) if (!r.isConnected) { const l = lines.get(r); if (l) l.remove(); lineRows.delete(r); }
+    cleanup();                                                  // drop badges of prices the page replaced, before re-adding
     const items = [...queue];
     queue.clear();
     for (const n of items) if (n.isConnected) scan(n);
@@ -374,7 +406,7 @@
     stacked.clear(); lineRows.clear();
     if (styleEl) styleEl.remove();
     styleEl = null;
-    done = new WeakSet();
+    badges.clear();
     lines = new WeakMap();
   }
 
