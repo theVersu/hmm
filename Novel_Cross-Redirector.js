@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Novel Cross-Redirector (Auto-Resolving Path Fixer)
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @description  Cross-redirect sidebar that builds candidate URLs for each novel site and VERIFIES every one (status, redirect target, page title) before linking to it. Detects which NovelPing/NovelArrow domain is live, hides itself on mobile, and links to the SAME CHAPTER on other sites where possible.
-// @author       AI Collaborator
+// @author       Claude
 // @match        *://*.webnovel.com/*
 // @match        *://*.novelfire.net/*
 // @match        *://*.novelphoenix.com/*
@@ -41,6 +41,7 @@
     const PROBE_TIMEOUT_MS = 12000;
     const PROBE_CONCURRENCY = 3;                   // parallel probes per site
     const MAX_CANDIDATES = 42;
+    const WN_TTL_MS = 5 * 365 * 24 * 60 * 60 * 1000; // Webnovel book ids never change: remembered (practically) forever
     const MISS_TTL_MS = 6 * 60 * 60 * 1000;       // a novel that is not on a site is not re-checked for 6 hours
     const RATE_LIMIT_COOLDOWN_MS = 90 * 1000;     // pause a site this long after it says "rate limited"
 
@@ -480,10 +481,20 @@
 
     // Violentmonkey menu entry: forget every verified link (useful when testing or after a site changes)
     if (typeof GM_registerMenuCommand === 'function' && typeof GM_listValues === 'function' && typeof GM_deleteValue === 'function') {
+        // (remembered Webnovel ids are kept: they cannot be re-derived once forgotten)
         GM_registerMenuCommand('Novel Cross-Redirector: clear saved links', () => {
             try {
-                GM_listValues().filter(k => k.indexOf(CACHE_PREFIX) === 0).forEach(k => GM_deleteValue(k));
-                alert('Saved links cleared. Reload the page.');
+                GM_listValues()
+                    .filter(k => k.indexOf(CACHE_PREFIX) === 0 && k.indexOf(CACHE_PREFIX + 'wnid:') !== 0)
+                    .forEach(k => GM_deleteValue(k));
+                alert('Saved links cleared (remembered Webnovel novels were kept). Reload the page.');
+            } catch (e) {}
+        });
+        GM_registerMenuCommand('Novel Cross-Redirector: forget remembered Webnovel novels', () => {
+            try {
+                if (!confirm('Forget every Webnovel novel the script remembered?')) return;
+                GM_listValues().filter(k => k.indexOf(CACHE_PREFIX + 'wnid:') === 0).forEach(k => GM_deleteValue(k));
+                alert('Forgotten. Reload the page.');
             } catch (e) {}
         });
     }
@@ -1005,6 +1016,7 @@
             // exact slug is only reusable when it came from a non-Webnovel site and is plain ASCII
             rawSlug: (!isWebnovel && /^[a-z0-9-]+$/i.test(slug)) ? slug : '',
             bookId,
+            isWebnovel,
             onNovelPage: onNovelPath && !chapterSeg,
             // the source novel's own page (used to look up its author)
             sourceNovelUrl: isWebnovel
@@ -1537,6 +1549,7 @@
     let latestInfo = { key: '', tokens: [] };
     let latestKey = '';
     let lastMvlRemembered = '';
+    let lastWnRemembered = '';
 
     function setState(btn, site, state, url, note) {
         if (url) btn.href = url;
@@ -1792,6 +1805,50 @@
         });
     }
 
+    // ---- Webnovel book ids --------------------------------------------------------------------------------
+    // Webnovel's own URLs always contain the book id (/book/<title>_<id> or /book/<id>) and both forms open the
+    // novel, but the id cannot be derived from a title. So every Webnovel novel you open is remembered here, and
+    // the Webnovel button on the other sites then links straight to https://www.webnovel.com/book/<id>.
+    // Ids are stored under every name the novel is known by (compact form), so a novel that is called something
+    // else on another site is still recognised.
+
+    function wnNameKeys(title, slug) {
+        const keys = [compact(title), compact(stripSuffixes(slug || ''))].filter(k => k && k.length >= 4);
+        return Array.from(new Set(keys));
+    }
+
+    function rememberWebnovelBook(info) {
+        if (!info || !info.isWebnovel || !info.bookId) return;
+        wnNameKeys(info.title, info.slug).concat(info.key && info.key.length >= 4 ? [info.key] : []).forEach(k => {
+            if (cacheGet('wnid:' + k, WN_TTL_MS) !== info.bookId) {
+                cacheSet('wnid:' + k, info.bookId);
+                dbg('remembered Webnovel id', info.bookId, 'for', k);
+            }
+        });
+    }
+
+    function lookupWebnovelId(info) {
+        const keys = [info.key].concat(wnNameKeys(info.title, info.slug));
+        for (const k of keys) {
+            if (!k) continue;
+            const id = cacheGet('wnid:' + k, WN_TTL_MS);
+            if (id) return id;
+        }
+        return '';
+    }
+
+    // While on a Webnovel novel, the titles other sites use for it (found + verified there) become extra names
+    function rememberWebnovelAlias(entry) {
+        if (!latestInfo || !latestInfo.isWebnovel || !latestInfo.bookId) return;
+        [entry.title, (entry.slug || '').replace(/-/g, ' ')].forEach(t => {
+            const k = compact(t);
+            if (k && k.length >= 4 && cacheGet('wnid:' + k, WN_TTL_MS) !== latestInfo.bookId) {
+                cacheSet('wnid:' + k, latestInfo.bookId);
+                dbg('Webnovel id', latestInfo.bookId, 'also known as', k, '(' + entry.siteKey + ')');
+            }
+        });
+    }
+
     // What the other buttons have already found for THIS novel: { siteKey, slug, title }.
     // A site that cannot be searched (Mvlempyr) - or where the novel was renamed - tries these: a renamed novel
     // usually has the same new slug / title everywhere (NovelPing's slug is also Mvlempyr's).
@@ -1806,6 +1863,7 @@
         const p = getPool(gen);
         if (p.entries.some(e => e.siteKey === entry.siteKey && e.slug === entry.slug)) return;
         p.entries.push(entry);
+        rememberWebnovelAlias(entry);
         dbg('shared with the other buttons:', entry.siteKey, entry.slug, '|', entry.title);
         p.subs.slice().forEach(fn => fn(entry));
     }
@@ -1829,11 +1887,14 @@
             return;
         }
 
-        // Webnovel target is a search page - nothing to verify, and no chapter links
+        // Webnovel target: the novel's own page if it was ever opened on Webnovel (id remembered), else a
+        // title search. Nothing to verify, and no chapter links (Webnovel chapter ids can't be derived).
         if (site.key === 'webnovel') {
+            const wnId = lookupWebnovelId(info);
             st.ok = true;
-            st.novelUrl = stage1[0];
-            setState(btn, site, 'ok', stage1[0], 'search');
+            st.novelUrl = wnId ? 'https://www.webnovel.com/book/' + wnId : stage1[0];
+            dbg('webnovel:', wnId ? 'remembered id ' + wnId : 'id unknown - linking to a search');
+            setState(btn, site, 'ok', st.novelUrl, wnId ? 'saved novel page' : 'search');
             return;
         }
 
@@ -2222,6 +2283,12 @@
         latestChapter = info.chapter;
         latestInfo = info;
         latestKey = info.key;
+
+        // Opened a novel on Webnovel -> remember its id (read from the URL) for later trips from other sites
+        if (info.isWebnovel && info.bookId && info.key && lastWnRemembered !== info.bookId + '|' + info.key) {
+            lastWnRemembered = info.bookId + '|' + info.key;
+            rememberWebnovelBook(info);
+        }
 
         // On a Mvlempyr chapter page the novel id is right in the URL - remember it for later trips back to Mvlempyr
         if (info.mvlId && info.slug && lastMvlRemembered !== info.slug + info.mvlId) {
