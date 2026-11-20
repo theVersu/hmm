@@ -1,19 +1,21 @@
 // ==UserScript==
-// @name         Spoiler Blur (YouTube + Twitch)
+// @name         Spoiler Blur (YouTube+Twitch)
 // @namespace    spoiler-blur
-// @version      2.2
-// @author       Claude
+// @version      3.1
+// @author       Claude (Anthropic)
+// @description  Blurs thumbnails/titles of GTA VI related items on YouTube and Twitch
 // @match        https://www.youtube.com/*
 // @match        https://www.twitch.tv/*
 // @match        https://twitch.tv/*
+// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Spoiler_Blur_(YouTube+Twitch).js
+// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Spoiler_Blur_(YouTube+Twitch).js
 // @grant        GM_addStyle
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        GM_unregisterMenuCommand
 // @run-at       document-start
-// @downloadURL  https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Spoiler_Blur_(YouTube+Twitch).js
-// @updateURL    https://raw.githubusercontent.com/theVersu/hmm/refs/heads/main/Spoiler_Blur_(YouTube+Twitch).js
 // ==/UserScript==
 
 (function () {
@@ -21,8 +23,15 @@
 
   const IS_TW = /(^|\.)twitch\.tv$/.test(location.hostname);
 
-  // ================= defaults (editable later in the settings panel) =================
-  const DEFAULT_KEYWORDS = String.raw`# One per line.  word = partial match   "word" = whole word only   /regex/i = regex   "# " = comment
+  // ================= one-time cleanup of leftovers from older versions =================
+  if (!GM_getValue('migrated31', false)) {
+    ['keywords', 'twcats'].forEach((k) => GM_deleteValue(k));
+    GM_setValue('migrated31', true);
+  }
+
+  // ================= BUILT-IN LISTS (edit these in the code / on GitHub) =================
+  // Syntax, one per line:  word = partial match   "word" = whole word only   /regex/i = regex   "# " = comment
+  const BUILTIN_KEYWORDS = String.raw`# --- game title and studio ---
 /\bgta[\s\-_.]*(6|vi\b|six\b)/i
 /grand\s+theft\s+auto[\s\-_.:]*(6|vi\b|six\b)/i
 gta6
@@ -30,6 +39,8 @@ gtavi
 grand theft auto
 "gta"
 rockstar
+spoiler
+# --- places ---
 leonida
 vice city
 port gellhorn
@@ -39,27 +50,125 @@ ambrosia
 allied crystal
 only raw records
 jack of hearts
+# --- characters revealed before launch ---
 "lucia"
 "jason"
+lucia caminos
+jason duval
 cal hampton
 boobie
-/dre'?\s?quan/i
+/dre['’]?\s?quan/i
 real dimez
 bae-luxe
 "roxy"
+roxy rashad
 raul bautista
 brian heder
 "heder"
-stephen root
+"lori"
+# --- characters from the credits ---
+kenton rees
+katerina rosselli
+mattia tauro
+/aldo\s+m[eé]ndez/i
+mo watkins
+moses watkins
+bret vogel
+tyrone russo
+mia caminos
+papa audacity
+/yago\s+jim[eé]nez/i
+yasmani cabrera
+randy kozlov
+benedict halifax
+nicole park
+abraham gonzalez
+cisco delgado
+nate bozer
+nathan bozer
+raina koleva
+kordell grant
+/andr[eé]s\s+de\s+le[oó]n/i
+petra navarro
+/c[eé]sar\s+navarro/i
+gustavo herrera
+/rafa\s+de\s+le[oó]n/i
+omar dawoud
+giorgio gallo
+vinny capsik
+liz jackson
+kevin kueh
+sarah fitzroy
+dwnply
+# --- voice actors ---
 dylan rourke
 manni perez
 manni l. perez
-spoiler`;
+manny perez
+stephen root
+brad carter
+orlagh cassidy
+mallory wu
+edwina rai
+massi pregoni
+carl palmer
+chris mckinney
+brad fleischer
+aaron morton
+david stishan
+spenser granese
+jariko denman
+naiqui macabroad
+hood brat
+krissy celess
+mike forbs
+taylor novak
+brian furey
+victor almanzar
+hiram delgado
+serge didenko
+ian scott mcgregor
+sierra katow
+nick pupo
+/mario\s+d['’]leon/i
+brendan sagalow
+oksana grishina
+/j\.?\s*eddie\s+martinez/i
+elaine del valle
+anthony ruiz
+josue gutierrez
+jordan j. adams
+/sebasti[aá]n\s+monta[nñ]ez/i
+barzin akhavan
+jake ventimiglia
+roger wayne
+/tifan[eé]\s+williams/i
+abraham lim
+michael hollick
+kelly grago
+jaime lincoln smith
+rafi silver
+christine spang
+alfredo diaz
+josephine phoenix
+# --- well-known actors ---
+denzel curry
+michael jai white
+taryn manning
+bobby moynihan
+sergio castellitto
+roselyn sanchez
+lisa emery
+machel montano
+# --- first-name-only characters: only when GTA/Rockstar is also mentioned ---
+/(?=[\s\S]*\b(gta|grand theft auto|rockstar)\b)[\s\S]*\b(donnie|andy|linda|vicki|dunk|billy|wyman|karim|andrea|felipe|valentina|raymond|dardan|pilot pete|the hitman)\b/i`;
 
-  const DEFAULT_TW_CATS = String.raw`# Twitch categories whose stream thumbnails get blurred. Same syntax as the keywords.
+  // Twitch categories whose stream thumbnails get blurred (same syntax)
+  const BUILTIN_TW_CATS = String.raw`# Twitch categories
 /grand\s+theft\s+auto[\s\-:_.]*(6|vi\b|six\b)/i
 /\bgta[\s\-_.]*(6|vi\b|six\b)/i`;
 
+  // ================= settings =================
   const DEFAULTS = {
     enabled: true,       // master switch
     match: true,         // blur items whose text matches
@@ -78,11 +187,11 @@ spoiler`;
 
   const load = () => { try { return JSON.parse(GM_getValue('settings', '{}')) || {}; } catch (e) { return {}; } };
   const S = Object.assign({}, DEFAULTS, load());
-  let KW_TEXT = GM_getValue('keywords', DEFAULT_KEYWORDS);
-  let TWC_TEXT = GM_getValue('twcats', DEFAULT_TW_CATS);
+  let EXTRA_KW = GM_getValue('extraKeywords', '');   // your own additions (stored locally)
+  let EXTRA_TWC = GM_getValue('extraTwCats', '');
   const save = () => GM_setValue('settings', JSON.stringify(S));
 
-  // ================= keywords =================
+  // ================= keyword compiling =================
   const norm = (s) => s.replace(/[’‘]/g, "'");
 
   function compile(text) {
@@ -108,8 +217,9 @@ spoiler`;
     }
     return out;
   }
-  let KW = compile(KW_TEXT);
-  let TWC = compile(TWC_TEXT);
+  const BUILTIN_KW_COUNT = compile(BUILTIN_KEYWORDS).length;
+  let KW = compile(BUILTIN_KEYWORDS + '\n' + EXTRA_KW);
+  let TWC = compile(BUILTIN_TW_CATS + '\n' + EXTRA_TWC);
 
   // ================= selectors =================
   // YouTube
@@ -166,10 +276,11 @@ spoiler`;
     #sf-panel .sf-grp { margin: 12px 0 4px; font-weight: 600; color: #9cc; }
     #sf-panel .sf-row { display: flex; gap: 8px; align-items: center; padding: 2px 0; cursor: pointer; }
     #sf-panel .sf-sub { padding-left: 22px; }
+    #sf-panel details { margin: 6px 0; }
+    #sf-panel summary { cursor: pointer; color: #9cc; }
     #sf-panel textarea { width: 100%; box-sizing: border-box; background: #121212; color: #eee; border: 1px solid #555;
       border-radius: 6px; padding: 6px; font: 12px/1.35 ui-monospace, Consolas, monospace; }
     #sf-panel .sf-help { color: #aaa; font-size: 11.5px; margin: 4px 0; }
-    #sf-panel button.sf-btn { margin-top: 6px; background: #333; color: #eee; border: 1px solid #555; border-radius: 6px; padding: 4px 10px; cursor: pointer; }
     #sf-toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); z-index: 2147483647;
       background: #222; color: #fff; padding: 8px 16px; border-radius: 8px; font: 14px system-ui; opacity: 0; transition: opacity .2s; pointer-events: none; }
     #sf-toast.show { opacity: 1; }
@@ -325,7 +436,7 @@ spoiler`;
       addCmd('nall', mark(S.nall) + ' Blur ALL notification images', () => setS('nall', !S.nall));
       addCmd('pall', mark(S.pall) + ' Blur ALL post images', () => setS('pall', !S.pall));
     }
-    addCmd('panel', '⚙ Open settings panel / edit lists', openPanel);
+    addCmd('panel', '⚙ Open settings panel / extra keywords', openPanel);
   }
 
   // ================= settings panel =================
@@ -368,14 +479,16 @@ spoiler`;
     });
 
     const kwBox = listBox(
-      () => KW_TEXT,
-      (v) => { KW_TEXT = v; GM_setValue('keywords', v); },
-      () => { KW = compile(KW_TEXT); }, 12);
+      () => EXTRA_KW,
+      (v) => { EXTRA_KW = v; GM_setValue('extraKeywords', v); },
+      () => { KW = compile(BUILTIN_KEYWORDS + '\n' + EXTRA_KW); }, 6);
 
     const twBox = listBox(
-      () => TWC_TEXT,
-      (v) => { TWC_TEXT = v; GM_setValue('twcats', v); },
-      () => { TWC = compile(TWC_TEXT); }, 4);
+      () => EXTRA_TWC,
+      (v) => { EXTRA_TWC = v; GM_setValue('extraTwCats', v); },
+      () => { TWC = compile(BUILTIN_TW_CATS + '\n' + EXTRA_TWC); }, 3);
+
+    const builtinView = el('textarea', { rows: 10, readOnly: true, spellcheck: false, value: BUILTIN_KEYWORDS });
 
     const panel = el('div', { id: 'sf-panel' },
       el('div', { class: 'sf-head' },
@@ -388,8 +501,8 @@ spoiler`;
       checkbox('matchVideos', 'YouTube video cards (thumbnail + title)', true),
       checkbox('matchNotifs', 'YouTube notifications', true),
       checkbox('matchPosts', 'YouTube posts', true),
-      checkbox('matchTwitch', 'Twitch streams in the categories below (thumbnail only)', true),
-      checkbox('twTitles', 'Twitch: also match titles/channels with the keyword list', true),
+      checkbox('matchTwitch', 'Twitch streams in the listed categories (thumbnail only)', true),
+      checkbox('twTitles', 'Twitch: also match titles/channels with the keyword lists', true),
 
       el('div', { class: 'sf-grp' }, 'Blur without matching'),
       checkbox('vall', 'All YouTube video thumbnails'),
@@ -401,29 +514,19 @@ spoiler`;
       el('div', { class: 'sf-grp' }, 'Blur strength'),
       slider,
 
-      el('div', { class: 'sf-grp' }, 'Twitch categories'),
-      el('div', { class: 'sf-help' }, 'Matched against the category shown on each Twitch card. Same syntax as below.'),
-      twBox,
-      el('button', {
-        class: 'sf-btn', textContent: 'Reset categories to default',
-        onclick: () => {
-          twBox.value = DEFAULT_TW_CATS;
-          twBox.dispatchEvent(new Event('input'));
-        },
-      }),
+      el('div', { class: 'sf-grp' }, 'Built-in lists'),
+      el('div', { class: 'sf-help' },
+        BUILTIN_KW_COUNT + ' keyword entries and the default Twitch categories are built into the script. ' +
+        'To change them, edit the script code (e.g. on GitHub) and bump @version.'),
+      el('details', {}, el('summary', { textContent: 'Show built-in keyword list' }), builtinView),
 
-      el('div', { class: 'sf-grp' }, 'Keywords (YouTube; Twitch only if the option above is ticked)'),
+      el('div', { class: 'sf-grp' }, 'Your extra Twitch categories'),
+      twBox,
+
+      el('div', { class: 'sf-grp' }, 'Your extra keywords (stored on this device only)'),
       el('div', { class: 'sf-help' },
         'One per line, not case-sensitive. word = partial match · "word" = whole word only · /regex/i = regex · lines starting with "# " are comments.'),
       kwBox,
-      el('button', {
-        class: 'sf-btn', textContent: 'Reset keywords to default',
-        onclick: () => {
-          if (!confirm('Reset the keyword list to the default?')) return;
-          kwBox.value = DEFAULT_KEYWORDS;
-          kwBox.dispatchEvent(new Event('input'));
-        },
-      }),
       el('div', { class: 'sf-help' }, 'Alt+click a blurred item to reveal it. Changes apply instantly.'),
     );
     (document.body || document.documentElement).appendChild(panel);
